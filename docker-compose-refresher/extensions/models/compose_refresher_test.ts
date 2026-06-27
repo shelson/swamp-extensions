@@ -75,7 +75,7 @@ const localHost = {
 // ---------------------------------------------------------------------------
 
 Deno.test("model export has correct type", () => {
-  assertEquals(model.type, "@shelson/compose-refresher");
+  assertEquals(model.type, "@shelson/docker-compose-refresher");
 });
 
 Deno.test("model version matches CalVer format", () => {

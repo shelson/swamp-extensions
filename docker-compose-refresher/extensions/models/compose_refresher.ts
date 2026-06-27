@@ -165,27 +165,37 @@ async function runDocker(
   const fullCmd: string[] = host.sudo
     ? ["sudo", dockerBin, ...args]
     : [dockerBin, ...args];
+  // Use caller's signal if provided, otherwise enforce the declared timeout so
+  // neither local nor SSH commands can hang indefinitely.
+  const signal = opts.signal ?? AbortSignal.timeout(timeoutSec * 1000);
 
   if (host.transport === "local") {
     const proc = new Deno.Command(fullCmd[0], {
       args: fullCmd.slice(1),
       stdout: "piped",
       stderr: "piped",
-      signal: opts.signal,
+      signal,
     });
-    const { code, stdout, stderr } = await proc.output();
-    return {
-      ok: code === 0,
-      stdout: new TextDecoder().decode(stdout),
-      stderr: new TextDecoder().decode(stderr),
-      code,
-    };
+    try {
+      const { code, stdout, stderr } = await proc.output();
+      return {
+        ok: code === 0,
+        stdout: new TextDecoder().decode(stdout),
+        stderr: new TextDecoder().decode(stderr),
+        code,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, stdout: "", stderr: `timed out: ${msg}`, code: -1 };
+    }
   }
 
   // ssh transport: assemble the docker command string, base64-encode it, and
   // pipe through `sh` on the remote so no host-shell expansion happens.
+  // Use encodeURIComponent + unescape to safely handle non-ASCII characters
+  // (e.g. Unicode in project/service names or paths) before btoa encoding.
   const remoteCmd = fullCmd.map(shQuote).join(" ");
-  const b64 = btoa(remoteCmd);
+  const b64 = btoa(unescape(encodeURIComponent(remoteCmd)));
   const sshArgs = [
     "-o",
     "BatchMode=yes",
@@ -209,15 +219,20 @@ async function runDocker(
     args: sshArgs,
     stdout: "piped",
     stderr: "piped",
-    signal: opts.signal,
+    signal,
   });
-  const { code, stdout, stderr } = await proc.output();
-  return {
-    ok: code === 0,
-    stdout: new TextDecoder().decode(stdout),
-    stderr: new TextDecoder().decode(stderr),
-    code,
-  };
+  try {
+    const { code, stdout, stderr } = await proc.output();
+    return {
+      ok: code === 0,
+      stdout: new TextDecoder().decode(stdout),
+      stderr: new TextDecoder().decode(stderr),
+      code,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, stdout: "", stderr: `timed out: ${msg}`, code: -1 };
+  }
 }
 
 /**
@@ -641,8 +656,8 @@ interface ExecuteContext {
 }
 
 export const model = {
-  type: "@shelson/compose-refresher",
-  version: "2026.06.28.2",
+  type: "@shelson/docker-compose-refresher",
+  version: "2026.06.28.3",
   globalArguments: GlobalArgsSchema,
   checks: {
     "host-reachable": {

@@ -1,18 +1,18 @@
-## 2026.06.28.2
+## 2026.06.28.3
 
-**Added:** Completion summary log line (`Refresh complete`) at info level after
-each run — reports mode, project count, candidates,
-would-update/updated/up-to-date/failed/error counts in one structured entry.
+**Fixed:** Local docker commands now respect the declared `timeoutSec` via
+`AbortSignal.timeout()` — previously only SSH's `ConnectTimeout` was wired. Both
+local and SSH branches now convert abort/timeout to a clean error result rather
+than propagating an exception.
 
-**Added:** `host-reachable` pre-flight check (label: `live`) runs `docker info`
-on every configured host before the `refresh` method executes. Unreachable hosts
-fail the check with a descriptive error so the apply path never starts against a
-host that can't be reached. Skip with `--skip-check-label live` for
-offline/dry-run scenarios.
+**Fixed:** SSH base64 encoding now safely handles non-ASCII characters in
+project/service names and paths (`encodeURIComponent` + `unescape` before
+`btoa`).
 
-**Added:** Unit tests (`compose_refresher_test.ts`) covering the four pure
-functions: `parseLsJson` (JSON array, NDJSON, single object, missing WorkingDir
-derivation), `splitImageTag` (tagged, untagged, digest-pinned, host:port
-prefix), `isCandidate` (tag match, untagged branch, non-candidate),
-`compareDigests` (match, differ, container-inspect fallback to cache,
-both-unavailable error path).
+**Changed:** Model type renamed from `@shelson/compose-refresher` to
+`@shelson/docker-compose-refresher` to align with the package name. **Upgrade
+note:** Update existing model definitions — change
+`type: "@shelson/compose-refresher"` to
+`type: "@shelson/docker-compose-refresher"` and rename the model directory from
+`models/@shelson/compose-refresher/` to
+`models/@shelson/docker-compose-refresher/`.
