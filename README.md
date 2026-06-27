@@ -1,2 +1,3 @@
-# swamp-infra-toys
-Managing infra things and workflows using swamp-club
+# swamp-extensions
+My extensions for Swamp Club - https://swamp-club.com/u/shelson
+
