@@ -8,6 +8,7 @@ import {
   compareDigests,
   isCandidate,
   model,
+  utf8ToBase64,
   parseLsJson,
   splitImageTag,
 } from "./compose_refresher.ts";
@@ -88,6 +89,40 @@ Deno.test("model has refresh method", () => {
 
 Deno.test("model has host-reachable check", () => {
   assertEquals(typeof model.checks["host-reachable"].execute, "function");
+});
+
+// ---------------------------------------------------------------------------
+// utf8ToBase64
+// ---------------------------------------------------------------------------
+
+Deno.test("utf8ToBase64: converts utf8 safely", () => {
+    const original = "this-is-a-test";
+    const encoded = utf8ToBase64(original);
+    assertEquals(encoded, "dGhpcy1pcy1hLXRlc3Q=");
+});
+
+Deno.test("utf8ToBase64: converts utf8 with emoji safely and decode", () => {
+    const original = "🎉-this-is-a-test";
+    const encoded = utf8ToBase64(original);
+    const decoded = new TextDecoder().decode(
+      Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))
+    );
+    assertEquals(decoded, original);
+});
+
+Deno.test("utf8ToBase64: converts utf8 with emoji, accents, kanji safely", () => {
+    const original = "🎉 café 你好 is-a-test";
+    const encoded = utf8ToBase64(original);
+    assertEquals(encoded, "8J+OiSBjYWbDqSDkvaDlpb0gaXMtYS10ZXN0");
+});
+
+Deno.test("utf8ToBase64: converts utf8 with emoji, accents, kanji safely and decode", () => {
+    const original = "🎉 café 你好 is-a-test";
+    const encoded = utf8ToBase64(original);
+    const decoded = new TextDecoder().decode(
+      Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))
+    );
+    assertEquals(decoded, original);
 });
 
 // ---------------------------------------------------------------------------

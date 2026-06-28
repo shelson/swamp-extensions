@@ -150,6 +150,12 @@ function shQuote(s: string): string {
   return "'" + s.replace(/'/g, `'"'"'`) + "'";
 }
 
+/** Convert UTF-8 to a base64 encoded string */
+export function utf8ToBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(''));
+}
+
 /**
  * Run `docker <args>` on the given host. Local hosts spawn docker directly;
  * ssh hosts run the assembled command on the remote via a base64 payload so
@@ -192,10 +198,9 @@ async function runDocker(
 
   // ssh transport: assemble the docker command string, base64-encode it, and
   // pipe through `sh` on the remote so no host-shell expansion happens.
-  // Use encodeURIComponent + unescape to safely handle non-ASCII characters
   // (e.g. Unicode in project/service names or paths) before btoa encoding.
   const remoteCmd = fullCmd.map(shQuote).join(" ");
-  const b64 = btoa(unescape(encodeURIComponent(remoteCmd)));
+  const b64 = utf8ToBase64(remoteCmd);
   const sshArgs = [
     "-o",
     "BatchMode=yes",
