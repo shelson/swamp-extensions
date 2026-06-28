@@ -672,7 +672,7 @@ interface ExecuteContext {
  */
 export const model = {
   type: "@shelson/docker-compose-refresher",
-  version: "2026.06.28.3",
+  version: "2026.06.28.4",
   globalArguments: GlobalArgsSchema,
   checks: {
     "host-reachable": {

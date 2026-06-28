@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@shelson/docker-compose-refresher"
-version: "2026.06.28.3"
+version: "2026.06.28.4"
 description: >
   Keep :latest-tagged (and untagged) services in local or SSH-reachable docker
   compose projects up to date. Compares each running container's image digest
