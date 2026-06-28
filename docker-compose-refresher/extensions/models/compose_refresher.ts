@@ -152,8 +152,8 @@ function shQuote(s: string): string {
 
 /** Convert UTF-8 to a base64 encoded string */
 export function utf8ToBase64(str: string): string {
-  return Buffer.from(str, 'utf-8').toString('base64');
-};
+  return Buffer.from(str, "utf-8").toString("base64");
+}
 
 /**
  * Run `docker <args>` on the given host. Local hosts spawn docker directly;
