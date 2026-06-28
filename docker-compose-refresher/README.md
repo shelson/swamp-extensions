@@ -1,9 +1,9 @@
-# @shelson/compose-refresher
+# @shelson/docker-compose-refresher
 
 Keep `:latest`-tagged (and untagged) services in local or SSH-reachable Docker
 Compose projects up to date.
 
-This is a single fan-out model, `@shelson/compose-refresher`, with one method,
+This is a single fan-out model, `@shelson/docker-compose-refresher`, with one method,
 `refresh`. For each configured host it discovers every running compose project,
 resolves each service's image ref, keeps only those whose tag is in `matchTags`
 (default `["latest"]`, plus untagged refs since Docker treats those as
@@ -90,11 +90,11 @@ can't read) without aborting the rest of the run.
 
 ```bash
 # Dry-run a local host
-swamp model @shelson/compose-refresher method run refresh my-host \
+swamp model @shelson/docker-compose-refresher method run refresh my-host \
   --input 'hosts:json=[{"name":"localhost","transport":"local"}]'
 
 # Apply on a remote host that needs sudo and a pinned docker path
-swamp model @shelson/compose-refresher method run refresh my-nas \
+swamp model @shelson/docker-compose-refresher method run refresh my-nas \
   --input 'hosts:json=[{"name":"nas","transport":"ssh","sshHost":"nas","sshUser":"admin","sudo":true}]' \
   --input dockerBin=/usr/local/bin/docker \
   --input apply=true

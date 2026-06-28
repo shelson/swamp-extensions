@@ -1,5 +1,5 @@
 /**
- * `@simon/compose-refresher` — keep `:latest`-tagged services in local (or
+ * `@shelson/docker-compose-refresher` — keep `:latest`-tagged services in local (or
  * SSH-reachable) docker compose projects up to date.
  *
  * One fan-out method, `refresh`, which:
@@ -460,7 +460,7 @@ async function waitForHealthy(
   if (!containerId) return { ok: false, detail: "no container id after up" };
   const fmt =
     `'{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'`;
-  const iters = Math.max(1, Math.floor(timeoutSec / 2));
+  const iters = Math.max(1, Math.floor(timeoutSec / 2)); // polls every 2 seconds
   for (let i = 0; i < iters; i++) {
     const res = await runDocker(host, dockerBin, [
       "container",
