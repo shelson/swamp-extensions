@@ -146,14 +146,15 @@ interface ExecResult {
 /** POSIX-shell-quote a single argument. */
 function shQuote(s: string): string {
   if (s === "") return "''";
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
+  if (/^[A-Za-z0-9_@%+=:,.-]+$/.test(s)) return s;
   return "'" + s.replace(/'/g, `'"'"'`) + "'";
 }
 
 /** Convert UTF-8 to a base64 encoded string */
 export function utf8ToBase64(str: string): string {
   const bytes = new TextEncoder().encode(str);
-  return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(''));
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  /** return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join('')); */
 }
 
 /**
