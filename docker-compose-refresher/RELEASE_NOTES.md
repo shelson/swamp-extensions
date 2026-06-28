@@ -3,6 +3,3 @@
 **Fixed:** SSH base64 encoding is now much more efficient than the original
 function that stitched characters together into an array.
 
-**Fixed:** Removed `/` from the "safe chars" in the shell args escaping
-function. It was unneeded and confusing.
-
