@@ -1,0 +1,26 @@
+manifestVersion: 1
+name: "@shelson/docker-compose-refresher"
+version: "2026.06.28.3"
+description: >
+  Keep :latest-tagged (and untagged) services in local or SSH-reachable docker
+  compose projects up to date. Compares each running container's image digest
+  against the registry (docker buildx imagetools) so already-current services
+  are left untouched, then pulls and recreates only stale ones with a
+  health-gate. Dry-run by default. Supports sudo-prefixed docker and per-host
+  SSH config.
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - compose_refresher.ts
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - docker
+  - compose
+  - updates
+  - containers
