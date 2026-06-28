@@ -100,6 +100,45 @@ swamp model @shelson/docker-compose-refresher method run refresh my-nas \
   --input apply=true
 ```
 
+## Example output
+
+After a dry-run, `swamp data get update_log` returns an `update_log` resource
+similar to:
+
+```json
+{
+  "ranAt": "2026-06-28T03:00:00.000Z",
+  "mode": "dry_run",
+  "totalProjects": 3,
+  "totalCandidates": 5,
+  "wouldUpdateCount": 2,
+  "upToDateCount": 3,
+  "actions": [
+    {
+      "host": "localhost",
+      "project": "monitoring",
+      "service": "grafana",
+      "image": "grafana/grafana:latest",
+      "matchedTag": "latest",
+      "digestLocal":    "sha256:aabbcc…",
+      "digestRegistry": "sha256:ddeeff…",
+      "decision": "would_update"
+    },
+    {
+      "host": "localhost",
+      "project": "monitoring",
+      "service": "prometheus",
+      "image": "prom/prometheus:latest",
+      "matchedTag": "latest",
+      "digestLocal":    "sha256:112233…",
+      "digestRegistry": "sha256:112233…",
+      "decision": "up_to_date"
+    }
+  ],
+  "projectErrors": []
+}
+```
+
 ## Auth
 
 No registry credentials are needed — `docker compose pull` and

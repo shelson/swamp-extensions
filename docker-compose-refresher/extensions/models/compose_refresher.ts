@@ -352,6 +352,12 @@ interface Candidate {
   matchedTag: string;
 }
 
+/**
+ * Return a `Candidate` descriptor when `image` is eligible for refresh, or
+ * `null` when it should be skipped. An image is eligible when its tag appears
+ * in `matchTags`, or when it has no tag at all and `alsoRefreshUntagged` is
+ * true (Docker pulls `:latest` for untagged refs).
+ */
 export function isCandidate(
   image: string,
   matchTags: string[],
@@ -659,6 +665,11 @@ interface ExecuteContext {
   ) => Promise<{ name: string }>;
 }
 
+/**
+ * Extension model definition for `@shelson/docker-compose-refresher`.
+ * Exports the fan-out `refresh` method and the `update_log` resource schema
+ * so swamp can register, type-check, and invoke this extension.
+ */
 export const model = {
   type: "@shelson/docker-compose-refresher",
   version: "2026.06.28.3",
