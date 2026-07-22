@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@shelson/letsencrypt-cloudflare-dns"
+version: "2026.07.01.1"
+description: >
+  Issues Let's Encrypt TLS certificates via ACME DNS-01 challenges and
+  provisions the challenge TXT records on Cloudflare through its DNS API.
+  Tight coupling: the ACME flow hands the challenge value directly to
+  Cloudflare, polls the authoritative CF API for propagation (instead of
+  busy-waiting public DNS), and cleans up TXT records after issuance.
+  Cert + private key + chain are written to a named vault so other
+  models can consume them via vault.get().
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - letsencrypt_cloudflare_dns.ts
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - letsencrypt
+  - acme
+  - tls
+  - certificates
+  - cloudflare
+  - dns
