@@ -1,11 +1,17 @@
 /**
  * Docker Compose project model — tracks a compose project's structure
  * (services, volumes, networks) and flexible key/value configuration as
- * swamp-managed data. Services live as sub-resources of their owning
- * project, so a service is always linked to exactly one project by
- * construction — there is no separate compose-service model type.
+ * swamp-managed data. Services, volumes, and networks all share the same
+ * shape: a bare named link (`EntityRefSchema`) plus a flat bag of per-key
+ * parameters validated against the matching compose-spec definition
+ * ("service" / "volume" / "network"). Project-level fields (version,
+ * configs, secrets, x-* extensions, ...) work the same way one level up,
+ * validated against the document root instead of a named definition.
+ * Services live as sub-resources of their owning project, so a service is
+ * always linked to exactly one project by construction — there is no
+ * separate compose-service model type.
  *
- * Every parameter, service field, and volume/network option is validated
+ * Every parameter, service field, and volume/network field is validated
  * against the official compose-spec JSON Schema
  * (https://github.com/compose-spec/compose-go) before it's written, so a
  * typo or malformed value is rejected at write time instead of surfacing
@@ -25,13 +31,15 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { parse as parseYaml } from "jsr:@std/yaml@1";
+import {
+  parse as parseYaml,
+  stringify as stringifyYaml,
+} from "jsr:@std/yaml@1";
 import { isAbsolute, join } from "jsr:@std/path@1";
 import {
   ComposeSchemaValidationError,
   validateDocument,
   validateField,
-  validateOptions,
 } from "./_lib/schema_validation.ts";
 
 const GlobalArgsSchema = z.object({
@@ -56,23 +64,36 @@ const ParameterValueSchema = z.union([
 ]);
 type ParameterValue = z.infer<typeof ParameterValueSchema>;
 
-const ParameterSchema = z.object({
+// Project-level (top-of-document) configuration parameters.
+const ProjectParameterSchema = z.object({
   key: z.string(),
   value: ParameterValueSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-type Parameter = z.infer<typeof ParameterSchema>;
-const ParameterListSchema = z.object({ parameters: z.array(ParameterSchema) });
+type ProjectParameter = z.infer<typeof ProjectParameterSchema>;
+const ProjectParameterListSchema = z.object({
+  parameters: z.array(ProjectParameterSchema),
+});
 
-const ServiceSchema = z.object({
+// Services, volumes, and networks are all "a named thing linked to this
+// project" — same bare identity shape, three separate typed collections so
+// a service, a volume, and a network can share a name without colliding.
+// Everything about what the thing actually configures (image, ports,
+// driver, driver_opts, ...) lives as per-key parameters, not fields on this
+// record, so create/update/delete for those fields is one generic
+// mechanism per kind instead of a bespoke "replace the whole options
+// object" method.
+const EntityRefSchema = z.object({
   name: z.string(),
-  description: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-type Service = z.infer<typeof ServiceSchema>;
-const ServiceListSchema = z.object({ services: z.array(ServiceSchema) });
+type EntityRef = z.infer<typeof EntityRefSchema>;
+
+const ServiceListSchema = z.object({ services: z.array(EntityRefSchema) });
+const VolumeListSchema = z.object({ items: z.array(EntityRefSchema) });
+const NetworkListSchema = z.object({ items: z.array(EntityRefSchema) });
 
 const ServiceParameterSchema = z.object({
   serviceName: z.string(),
@@ -87,18 +108,30 @@ const ServiceParameterListSchema = z.object({
   parameters: z.array(ServiceParameterSchema),
 });
 
-// Volumes and networks are both "named definitions with an options bag" in
-// compose — same shape, two separate typed collections so they don't share
-// a namespace or get confused with generic project parameters.
-const NamedDefinitionSchema = z.object({
-  name: z.string(),
-  options: z.record(z.string(), z.unknown()).default({}),
+const VolumeParameterSchema = z.object({
+  volumeName: z.string(),
+  key: z.string(),
+  value: ParameterValueSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-type NamedDefinition = z.infer<typeof NamedDefinitionSchema>;
-const NamedDefinitionListSchema = z.object({
-  items: z.array(NamedDefinitionSchema),
+type VolumeParameter = z.infer<typeof VolumeParameterSchema>;
+const VolumeParameterListSchema = z.object({
+  volumeName: z.string(),
+  parameters: z.array(VolumeParameterSchema),
+});
+
+const NetworkParameterSchema = z.object({
+  networkName: z.string(),
+  key: z.string(),
+  value: ParameterValueSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+type NetworkParameter = z.infer<typeof NetworkParameterSchema>;
+const NetworkParameterListSchema = z.object({
+  networkName: z.string(),
+  parameters: z.array(NetworkParameterSchema),
 });
 
 // The active compose-spec JSON Schema document, cached as instance data.
@@ -112,6 +145,16 @@ const ComposeSchemaCacheSchema = z.object({
   fetchedAt: z.string(),
 });
 type ComposeSchemaCache = z.infer<typeof ComposeSchemaCacheSchema>;
+
+// The rendered compose.yaml document produced by `renderComposeFile` —
+// derived data, not a source of truth. Re-rendered wholesale from the
+// project's services/volumes/networks/parameters on every call, so it
+// always reflects their current state rather than drifting out of sync.
+const ComposeFileSchema = z.object({
+  yaml: z.string(),
+  generatedAt: z.string(),
+});
+type ComposeFile = z.infer<typeof ComposeFileSchema>;
 
 const COMPOSE_SPEC_SCHEMA_URL =
   "https://raw.githubusercontent.com/compose-spec/compose-go/main/schema/compose-spec.json";
@@ -128,29 +171,39 @@ function nowIso(): string {
 const SERVICES_LIST_INSTANCE = "services";
 const VOLUMES_LIST_INSTANCE = "volumes";
 const NETWORKS_LIST_INSTANCE = "networks";
-const PARAMETERS_LIST_INSTANCE = "parameters";
+const PROJECT_PARAMETERS_LIST_INSTANCE = "parameters";
 const COMPOSE_SCHEMA_INSTANCE = "active";
+const COMPOSE_FILE_INSTANCE = "composeFile";
 const serviceInstance = (name: string) => `service-${name}`;
 const volumeInstance = (name: string) => `volume-${name}`;
 const networkInstance = (name: string) => `network-${name}`;
-const parameterInstance = (key: string) => `param-${key}`;
-// Service parameters nest under the same "service-<name>" prefix as the
-// service record itself (e.g. service-proxy::networks), rather than a
-// separate svcparam(s)- family, so `swamp data get` output visibly reads as
-// "attached to" the service. "__params__" is reserved for the per-service
-// parameter list — RESERVED_SERVICE_PARAMETER_KEY guards against a
-// user-supplied key colliding with it, since keys are otherwise unrestricted
-// strings.
-const RESERVED_SERVICE_PARAMETER_KEY = "__params__";
+const projectParameterInstance = (key: string) => `param-${key}`;
+
+// Per-entity parameters nest under the same "<kind>-<name>" prefix as the
+// entity record itself (e.g. service-proxy::ports), rather than a separate
+// family of instance names, so `swamp data get` output visibly reads as
+// "attached to" the service/volume/network. "__params__" is reserved for
+// the per-entity parameter list — assertValidParameterKey guards against a
+// user-supplied key colliding with it, since keys are otherwise
+// unrestricted strings.
+const RESERVED_PARAMETER_LIST_KEY = "__params__";
 const serviceParametersListInstance = (serviceName: string) =>
-  `service-${serviceName}::${RESERVED_SERVICE_PARAMETER_KEY}`;
+  `service-${serviceName}::${RESERVED_PARAMETER_LIST_KEY}`;
 const serviceParameterInstance = (serviceName: string, key: string) =>
   `service-${serviceName}::${key}`;
+const volumeParametersListInstance = (volumeName: string) =>
+  `volume-${volumeName}::${RESERVED_PARAMETER_LIST_KEY}`;
+const volumeParameterInstance = (volumeName: string, key: string) =>
+  `volume-${volumeName}::${key}`;
+const networkParametersListInstance = (networkName: string) =>
+  `network-${networkName}::${RESERVED_PARAMETER_LIST_KEY}`;
+const networkParameterInstance = (networkName: string, key: string) =>
+  `network-${networkName}::${key}`;
 
-function assertValidServiceParameterKey(key: string): void {
-  if (key === RESERVED_SERVICE_PARAMETER_KEY) {
+function assertValidParameterKey(key: string): void {
+  if (key === RESERVED_PARAMETER_LIST_KEY) {
     throw new Error(
-      `Parameter key '${RESERVED_SERVICE_PARAMETER_KEY}' is reserved`,
+      `Parameter key '${RESERVED_PARAMETER_LIST_KEY}' is reserved`,
     );
   }
 }
@@ -213,10 +266,110 @@ async function getActiveComposeSchema(
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
+/**
+ * Reassemble this project's current services (with their per-service
+ * parameters), volumes, networks (each with their per-entity parameters),
+ * and project-level parameters into a compose document, validate it
+ * against the active compose-spec schema, and store the serialized YAML as
+ * the `composeFile` resource.
+ *
+ * Called at the end of every method that mutates project structure
+ * (`importFromFile` and the create/update/delete methods below), so
+ * `composeFile` is always current for any other code reading this model's
+ * data — callers should never need to invoke `renderComposeFile` manually
+ * as a separate step.
+ */
+async function renderAndWriteComposeFile(
+  context: {
+    writeResource: WriteResource;
+    readResource: ReadResource;
+    extensionFile: (path: string) => string;
+  },
+): Promise<{ name: string }> {
+  const servicesList = (await context.readResource(
+    SERVICES_LIST_INSTANCE,
+  )) as { services: EntityRef[] } | null;
+  const volumesList = (await context.readResource(
+    VOLUMES_LIST_INSTANCE,
+  )) as { items: EntityRef[] } | null;
+  const networksList = (await context.readResource(
+    NETWORKS_LIST_INSTANCE,
+  )) as { items: EntityRef[] } | null;
+  const parametersList = (await context.readResource(
+    PROJECT_PARAMETERS_LIST_INSTANCE,
+  )) as { parameters: ProjectParameter[] } | null;
+
+  const services: Record<string, Record<string, unknown>> = {};
+  for (const service of servicesList?.services ?? []) {
+    const serviceParams = (await context.readResource(
+      serviceParametersListInstance(service.name),
+    )) as { serviceName: string; parameters: ServiceParameter[] } | null;
+    const serviceDoc: Record<string, unknown> = {};
+    for (const param of serviceParams?.parameters ?? []) {
+      serviceDoc[param.key] = param.value;
+    }
+    services[service.name] = serviceDoc;
+  }
+
+  const volumes: Record<string, Record<string, unknown>> = {};
+  for (const volume of volumesList?.items ?? []) {
+    const volumeParams = (await context.readResource(
+      volumeParametersListInstance(volume.name),
+    )) as { volumeName: string; parameters: VolumeParameter[] } | null;
+    const volumeDoc: Record<string, unknown> = {};
+    for (const param of volumeParams?.parameters ?? []) {
+      volumeDoc[param.key] = param.value;
+    }
+    volumes[volume.name] = volumeDoc;
+  }
+
+  const networks: Record<string, Record<string, unknown>> = {};
+  for (const network of networksList?.items ?? []) {
+    const networkParams = (await context.readResource(
+      networkParametersListInstance(network.name),
+    )) as { networkName: string; parameters: NetworkParameter[] } | null;
+    const networkDoc: Record<string, unknown> = {};
+    for (const param of networkParams?.parameters ?? []) {
+      networkDoc[param.key] = param.value;
+    }
+    networks[network.name] = networkDoc;
+  }
+
+  const compose: Record<string, unknown> = {};
+  for (const param of parametersList?.parameters ?? []) {
+    compose[param.key] = param.value;
+  }
+  if (Object.keys(services).length > 0) compose.services = services;
+  if (Object.keys(volumes).length > 0) compose.volumes = volumes;
+  if (Object.keys(networks).length > 0) compose.networks = networks;
+
+  const activeSchema = await getActiveComposeSchema(context);
+  try {
+    validateDocument(activeSchema, compose);
+  } catch (err) {
+    if (err instanceof ComposeSchemaValidationError) {
+      throw new Error(
+        `Rendered compose document is invalid: ${err.message}`,
+      );
+    }
+    throw err;
+  }
+
+  const composeFile: ComposeFile = {
+    yaml: stringifyYaml(compose, { sortKeys: false }),
+    generatedAt: nowIso(),
+  };
+  return await context.writeResource(
+    "composeFile",
+    COMPOSE_FILE_INSTANCE,
+    composeFile,
+  );
+}
+
 /** Docker Compose project model definition — structure and configuration only. */
 export const model = {
   type: "@shelson/compose/project",
-  version: "2026.07.23.2",
+  version: "2026.07.23.5",
   globalArguments: GlobalArgsSchema,
 
   resources: {
@@ -228,7 +381,7 @@ export const model = {
     },
     "service": {
       description: "Single compose service linked to this project",
-      schema: ServiceSchema,
+      schema: EntityRefSchema,
       lifetime: "infinite" as const,
       garbageCollection: 20,
     },
@@ -246,37 +399,61 @@ export const model = {
     },
     "volumes": {
       description: "List of volume definitions for this project",
-      schema: NamedDefinitionListSchema,
+      schema: VolumeListSchema,
       lifetime: "infinite" as const,
       garbageCollection: 10,
     },
     "volume": {
       description: "Single volume definition",
-      schema: NamedDefinitionSchema,
+      schema: EntityRefSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 20,
+    },
+    "volumeParameters": {
+      description: "List of configuration parameters for a single volume",
+      schema: VolumeParameterListSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 10,
+    },
+    "volumeParameter": {
+      description: "Single volume configuration parameter",
+      schema: VolumeParameterSchema,
       lifetime: "infinite" as const,
       garbageCollection: 20,
     },
     "networks": {
       description: "List of network definitions for this project",
-      schema: NamedDefinitionListSchema,
+      schema: NetworkListSchema,
       lifetime: "infinite" as const,
       garbageCollection: 10,
     },
     "network": {
       description: "Single network definition",
-      schema: NamedDefinitionSchema,
+      schema: EntityRefSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 20,
+    },
+    "networkParameters": {
+      description: "List of configuration parameters for a single network",
+      schema: NetworkParameterListSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 10,
+    },
+    "networkParameter": {
+      description: "Single network configuration parameter",
+      schema: NetworkParameterSchema,
       lifetime: "infinite" as const,
       garbageCollection: 20,
     },
     "parameters": {
       description: "List of project-level configuration parameters",
-      schema: ParameterListSchema,
+      schema: ProjectParameterListSchema,
       lifetime: "infinite" as const,
       garbageCollection: 10,
     },
     "parameter": {
       description: "Single project-level configuration parameter",
-      schema: ParameterSchema,
+      schema: ProjectParameterSchema,
       lifetime: "infinite" as const,
       garbageCollection: 20,
     },
@@ -284,6 +461,13 @@ export const model = {
       description:
         "Active compose-spec JSON Schema used to validate parameters, refreshed via updateSchema",
       schema: ComposeSchemaCacheSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 5,
+    },
+    "composeFile": {
+      description:
+        "Rendered compose.yaml document generated from this project's current services, volumes, networks, and parameters",
+      schema: ComposeFileSchema,
       lifetime: "infinite" as const,
       garbageCollection: 5,
     },
@@ -359,7 +543,7 @@ export const model = {
     // -----------------------------------------------------------------
     importFromFile: {
       description:
-        "Populate this project from an existing compose.yaml/docker-compose.yml file — services and their per-service config, volumes, networks, and any other top-level keys as project parameters. Validated against the active compose-spec schema before anything is written. Entries already present are updated in place (matched by name/key); entries not mentioned in the file are left untouched.",
+        "Populate this project from an existing compose.yaml/docker-compose.yml file — services, volumes, and networks (each with their per-entity config), and any other top-level keys as project parameters. Validated against the active compose-spec schema before anything is written. Entries already present are updated in place (matched by name/key); entries not mentioned in the file are left untouched.",
       arguments: z.object({
         path: z.string().min(1).describe(
           "Path to the compose.yaml/docker-compose.yml file to import, relative to the repository root or absolute",
@@ -425,8 +609,8 @@ export const model = {
         // ---- services + per-service parameters ----
         const existingServicesList = (await context.readResource(
           SERVICES_LIST_INSTANCE,
-        )) as { services: Service[] } | null;
-        const importedServices: Service[] = [];
+        )) as { services: EntityRef[] } | null;
+        const importedServices: EntityRef[] = [];
 
         const servicesBlock = asRecord(compose.services);
         for (
@@ -435,11 +619,10 @@ export const model = {
           const serviceDef = asRecord(serviceDefRaw);
           const existingService = await context.readResource(
             serviceInstance(serviceName),
-          ) as Service | null;
+          ) as EntityRef | null;
 
-          const service: Service = {
+          const service: EntityRef = {
             name: serviceName,
-            description: existingService?.description,
             createdAt: existingService?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
@@ -458,7 +641,7 @@ export const model = {
           const importedServiceParams: ServiceParameter[] = [];
 
           for (const [key, value] of Object.entries(serviceDef)) {
-            if (key === RESERVED_SERVICE_PARAMETER_KEY) {
+            if (key === RESERVED_PARAMETER_LIST_KEY) {
               context.logger.info(
                 "Skipping reserved parameter key {key} on service {service} from {file}",
                 { key, service: serviceName, file: filePath },
@@ -510,28 +693,81 @@ export const model = {
           }),
         );
 
-        // ---- volumes ----
+        // ---- volumes + per-volume parameters ----
         const existingVolumesList = (await context.readResource(
           VOLUMES_LIST_INSTANCE,
-        )) as { items: NamedDefinition[] } | null;
-        const importedVolumes: NamedDefinition[] = [];
+        )) as { items: EntityRef[] } | null;
+        const importedVolumes: EntityRef[] = [];
 
         for (
-          const [name, optionsRaw] of Object.entries(asRecord(compose.volumes))
+          const [volumeName, optionsRaw] of Object.entries(
+            asRecord(compose.volumes),
+          )
         ) {
+          const options = asRecord(optionsRaw);
           const existingVolume = await context.readResource(
-            volumeInstance(name),
-          ) as NamedDefinition | null;
-          const volume: NamedDefinition = {
-            name,
-            options: asRecord(optionsRaw),
+            volumeInstance(volumeName),
+          ) as EntityRef | null;
+
+          const volume: EntityRef = {
+            name: volumeName,
             createdAt: existingVolume?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
           handles.push(
-            await context.writeResource("volume", volumeInstance(name), volume),
+            await context.writeResource(
+              "volume",
+              volumeInstance(volumeName),
+              volume,
+            ),
           );
           importedVolumes.push(volume);
+
+          const existingVolumeParamsList = (await context.readResource(
+            volumeParametersListInstance(volumeName),
+          )) as { volumeName: string; parameters: VolumeParameter[] } | null;
+          const importedVolumeParams: VolumeParameter[] = [];
+
+          for (const [key, value] of Object.entries(options)) {
+            if (key === RESERVED_PARAMETER_LIST_KEY) {
+              context.logger.info(
+                "Skipping reserved parameter key {key} on volume {volume} from {file}",
+                { key, volume: volumeName, file: filePath },
+              );
+              continue;
+            }
+            const existingParam = await context.readResource(
+              volumeParameterInstance(volumeName, key),
+            ) as VolumeParameter | null;
+            const parameter: VolumeParameter = {
+              volumeName,
+              key,
+              value: value as ParameterValue,
+              createdAt: existingParam?.createdAt ?? timestamp,
+              updatedAt: timestamp,
+            };
+            handles.push(
+              await context.writeResource(
+                "volumeParameter",
+                volumeParameterInstance(volumeName, key),
+                parameter,
+              ),
+            );
+            importedVolumeParams.push(parameter);
+          }
+
+          const mergedVolumeParams = mergeByKey(
+            existingVolumeParamsList?.parameters ?? [],
+            importedVolumeParams,
+            (p) => p.key,
+          );
+          handles.push(
+            await context.writeResource(
+              "volumeParameters",
+              volumeParametersListInstance(volumeName),
+              { volumeName, parameters: mergedVolumeParams },
+            ),
+          );
         }
 
         const mergedVolumes = mergeByKey(
@@ -545,34 +781,81 @@ export const model = {
           }),
         );
 
-        // ---- networks ----
+        // ---- networks + per-network parameters ----
         const existingNetworksList = (await context.readResource(
           NETWORKS_LIST_INSTANCE,
-        )) as { items: NamedDefinition[] } | null;
-        const importedNetworks: NamedDefinition[] = [];
+        )) as { items: EntityRef[] } | null;
+        const importedNetworks: EntityRef[] = [];
 
         for (
-          const [name, optionsRaw] of Object.entries(
+          const [networkName, optionsRaw] of Object.entries(
             asRecord(compose.networks),
           )
         ) {
+          const options = asRecord(optionsRaw);
           const existingNetwork = await context.readResource(
-            networkInstance(name),
-          ) as NamedDefinition | null;
-          const network: NamedDefinition = {
-            name,
-            options: asRecord(optionsRaw),
+            networkInstance(networkName),
+          ) as EntityRef | null;
+
+          const network: EntityRef = {
+            name: networkName,
             createdAt: existingNetwork?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
           handles.push(
             await context.writeResource(
               "network",
-              networkInstance(name),
+              networkInstance(networkName),
               network,
             ),
           );
           importedNetworks.push(network);
+
+          const existingNetworkParamsList = (await context.readResource(
+            networkParametersListInstance(networkName),
+          )) as { networkName: string; parameters: NetworkParameter[] } | null;
+          const importedNetworkParams: NetworkParameter[] = [];
+
+          for (const [key, value] of Object.entries(options)) {
+            if (key === RESERVED_PARAMETER_LIST_KEY) {
+              context.logger.info(
+                "Skipping reserved parameter key {key} on network {network} from {file}",
+                { key, network: networkName, file: filePath },
+              );
+              continue;
+            }
+            const existingParam = await context.readResource(
+              networkParameterInstance(networkName, key),
+            ) as NetworkParameter | null;
+            const parameter: NetworkParameter = {
+              networkName,
+              key,
+              value: value as ParameterValue,
+              createdAt: existingParam?.createdAt ?? timestamp,
+              updatedAt: timestamp,
+            };
+            handles.push(
+              await context.writeResource(
+                "networkParameter",
+                networkParameterInstance(networkName, key),
+                parameter,
+              ),
+            );
+            importedNetworkParams.push(parameter);
+          }
+
+          const mergedNetworkParams = mergeByKey(
+            existingNetworkParamsList?.parameters ?? [],
+            importedNetworkParams,
+            (p) => p.key,
+          );
+          handles.push(
+            await context.writeResource(
+              "networkParameters",
+              networkParametersListInstance(networkName),
+              { networkName, parameters: mergedNetworkParams },
+            ),
+          );
         }
 
         const mergedNetworks = mergeByKey(
@@ -591,16 +874,16 @@ export const model = {
         // doesn't silently drop fields this model has no dedicated slot for.
         const structuralKeys = new Set(["services", "volumes", "networks"]);
         const existingProjectParamsList = (await context.readResource(
-          PARAMETERS_LIST_INSTANCE,
-        )) as { parameters: Parameter[] } | null;
-        const importedParameters: Parameter[] = [];
+          PROJECT_PARAMETERS_LIST_INSTANCE,
+        )) as { parameters: ProjectParameter[] } | null;
+        const importedParameters: ProjectParameter[] = [];
 
         for (const [key, value] of Object.entries(compose)) {
           if (structuralKeys.has(key)) continue;
           const existingParam = await context.readResource(
-            parameterInstance(key),
-          ) as Parameter | null;
-          const parameter: Parameter = {
+            projectParameterInstance(key),
+          ) as ProjectParameter | null;
+          const parameter: ProjectParameter = {
             key,
             value: value as ParameterValue,
             createdAt: existingParam?.createdAt ?? timestamp,
@@ -609,7 +892,7 @@ export const model = {
           handles.push(
             await context.writeResource(
               "parameter",
-              parameterInstance(key),
+              projectParameterInstance(key),
               parameter,
             ),
           );
@@ -622,10 +905,14 @@ export const model = {
           (p) => p.key,
         );
         handles.push(
-          await context.writeResource("parameters", PARAMETERS_LIST_INSTANCE, {
-            parameters: mergedParameters,
-          }),
+          await context.writeResource(
+            "parameters",
+            PROJECT_PARAMETERS_LIST_INSTANCE,
+            { parameters: mergedParameters },
+          ),
         );
+
+        handles.push(await renderAndWriteComposeFile(context));
 
         context.logger.info(
           "Imported {services} service(s), {volumes} volume(s), {networks} network(s), {parameters} project parameter(s) from {file}",
@@ -643,24 +930,50 @@ export const model = {
     },
 
     // -----------------------------------------------------------------
+    // Render — the inverse of importFromFile. Every method below that
+    // mutates project structure already calls renderAndWriteComposeFile
+    // itself, so composeFile is always current; this method exists only
+    // to force a fresh render with no other side effect (e.g. after
+    // running updateSchema, to re-validate against a refreshed schema).
+    // -----------------------------------------------------------------
+    renderComposeFile: {
+      description:
+        "Force a fresh render of this project's current services, volumes, networks, and parameters into a valid compose.yaml document, storing it as the composeFile data attribute. Every mutating method already does this automatically after writing its own change — call this directly only to refresh composeFile with no other side effect (e.g. after updateSchema)",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        const handle = await renderAndWriteComposeFile(context);
+        return { dataHandles: [handle] };
+      },
+    },
+
+    // -----------------------------------------------------------------
     // Services — "create and link a child compose-service" is realized
     // by writing the service as a sub-resource of this project instance,
-    // so ownership by exactly one project holds by construction.
+    // so ownership by exactly one project holds by construction. Every
+    // compose field a service needs (image, ports, environment, ...) is
+    // set afterwards via createServiceParameter/updateServiceParameter/
+    // deleteServiceParameter — there is no separate "update" for the
+    // service link itself since it has no mutable fields of its own.
     // -----------------------------------------------------------------
     createService: {
       description: "Create and link a new compose service to this project",
       arguments: z.object({
         name: z.string().min(1).describe("Service name"),
-        description: z.string().optional().describe(
-          "Optional human-readable description",
-        ),
       }),
       execute: async (
-        args: { name: string; description?: string },
+        args: { name: string },
         context: {
           globalArgs: GlobalArgs;
           writeResource: WriteResource;
           readResource: ReadResource;
+          extensionFile: (path: string) => string;
           logger: {
             info: (msg: string, props: Record<string, unknown>) => void;
           };
@@ -674,9 +987,8 @@ export const model = {
         }
 
         const timestamp = nowIso();
-        const service: Service = {
+        const service: EntityRef = {
           name: args.name,
-          description: args.description,
           createdAt: timestamp,
           updatedAt: timestamp,
         };
@@ -687,7 +999,7 @@ export const model = {
         );
 
         const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
-          | { services: Service[] }
+          | { services: EntityRef[] }
           | null;
         const services = [...(list?.services ?? []), service];
         const listHandle = await context.writeResource(
@@ -696,94 +1008,13 @@ export const model = {
           { services },
         );
 
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
         context.logger.info("Linked service {name} to project {project}", {
           name: args.name,
           project: context.globalArgs.projectName,
         });
-        return { dataHandles: [serviceHandle, listHandle] };
-      },
-    },
-
-    listServices: {
-      description: "List services linked to this project",
-      arguments: z.object({}),
-      execute: async (
-        _args: Record<string, never>,
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
-          | { services: Service[] }
-          | null;
-        const handle = await context.writeResource(
-          "services",
-          SERVICES_LIST_INSTANCE,
-          { services: list?.services ?? [] },
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    getService: {
-      description: "Fetch a single service by name",
-      arguments: z.object({ name: z.string().describe("Service name") }),
-      execute: async (
-        args: { name: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const service = await context.readResource(serviceInstance(args.name));
-        if (!service) {
-          throw new Error(`Service '${args.name}' not found`);
-        }
-        const handle = await context.writeResource(
-          "service",
-          serviceInstance(args.name),
-          service,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    updateService: {
-      description: "Update a service's description",
-      arguments: z.object({
-        name: z.string().describe("Service name"),
-        description: z.string().describe("New description"),
-      }),
-      execute: async (
-        args: { name: string; description: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const existing = await context.readResource(
-          serviceInstance(args.name),
-        ) as Service | null;
-        if (!existing) {
-          throw new Error(`Service '${args.name}' not found`);
-        }
-
-        const updated: Service = {
-          ...existing,
-          description: args.description,
-          updatedAt: nowIso(),
-        };
-        const serviceHandle = await context.writeResource(
-          "service",
-          serviceInstance(args.name),
-          updated,
-        );
-
-        const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
-          | { services: Service[] }
-          | null;
-        const services = (list?.services ?? []).map((s) =>
-          s.name === args.name ? updated : s
-        );
-        const listHandle = await context.writeResource(
-          "services",
-          SERVICES_LIST_INSTANCE,
-          { services },
-        );
-
-        return { dataHandles: [serviceHandle, listHandle] };
+        return { dataHandles: [serviceHandle, listHandle, composeFileHandle] };
       },
     },
 
@@ -796,6 +1027,7 @@ export const model = {
           globalArgs: GlobalArgs;
           writeResource: WriteResource;
           readResource: ReadResource;
+          extensionFile: (path: string) => string;
           logger: {
             info: (msg: string, props: Record<string, unknown>) => void;
           };
@@ -809,7 +1041,7 @@ export const model = {
         }
 
         const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
-          | { services: Service[] }
+          | { services: EntityRef[] }
           | null;
         const services = (list?.services ?? []).filter((s) =>
           s.name !== args.name
@@ -820,11 +1052,13 @@ export const model = {
           { services },
         );
 
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
         context.logger.info("Unlinked service {name} from project {project}", {
           name: args.name,
           project: context.globalArgs.projectName,
         });
-        return { dataHandles: [handle] };
+        return { dataHandles: [handle, composeFileHandle] };
       },
     },
 
@@ -849,7 +1083,7 @@ export const model = {
           extensionFile: (path: string) => string;
         },
       ) => {
-        assertValidServiceParameterKey(args.key);
+        assertValidParameterKey(args.key);
         const serviceExists = await context.readResource(
           serviceInstance(args.serviceName),
         );
@@ -893,57 +1127,9 @@ export const model = {
           { serviceName: args.serviceName, parameters },
         );
 
-        return { dataHandles: [paramHandle, listHandle] };
-      },
-    },
+        const composeFileHandle = await renderAndWriteComposeFile(context);
 
-    listServiceParameters: {
-      description: "List configuration parameters for a service",
-      arguments: z.object({
-        serviceName: z.string().describe("Service name"),
-      }),
-      execute: async (
-        args: { serviceName: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const listInstance = serviceParametersListInstance(args.serviceName);
-        const list = (await context.readResource(listInstance)) as
-          | { serviceName: string; parameters: ServiceParameter[] }
-          | null;
-        const handle = await context.writeResource(
-          "serviceParameters",
-          listInstance,
-          { serviceName: args.serviceName, parameters: list?.parameters ?? [] },
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    getServiceParameter: {
-      description: "Fetch a single service configuration parameter",
-      arguments: z.object({
-        serviceName: z.string().describe("Service name"),
-        key: z.string().describe("Parameter key"),
-      }),
-      execute: async (
-        args: { serviceName: string; key: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        assertValidServiceParameterKey(args.key);
-        const parameter = await context.readResource(
-          serviceParameterInstance(args.serviceName, args.key),
-        );
-        if (!parameter) {
-          throw new Error(
-            `Parameter '${args.key}' not found on service '${args.serviceName}'`,
-          );
-        }
-        const handle = await context.writeResource(
-          "serviceParameter",
-          serviceParameterInstance(args.serviceName, args.key),
-          parameter,
-        );
-        return { dataHandles: [handle] };
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
 
@@ -965,7 +1151,7 @@ export const model = {
           extensionFile: (path: string) => string;
         },
       ) => {
-        assertValidServiceParameterKey(args.key);
+        assertValidParameterKey(args.key);
         const existing = await context.readResource(
           serviceParameterInstance(args.serviceName, args.key),
         ) as ServiceParameter | null;
@@ -1002,7 +1188,9 @@ export const model = {
           { serviceName: args.serviceName, parameters },
         );
 
-        return { dataHandles: [paramHandle, listHandle] };
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
 
@@ -1014,9 +1202,13 @@ export const model = {
       }),
       execute: async (
         args: { serviceName: string; key: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
       ) => {
-        assertValidServiceParameterKey(args.key);
+        assertValidParameterKey(args.key);
         const existing = await context.readResource(
           serviceParameterInstance(args.serviceName, args.key),
         );
@@ -1039,14 +1231,537 @@ export const model = {
           { serviceName: args.serviceName, parameters },
         );
 
-        return { dataHandles: [handle] };
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [handle, composeFileHandle] };
+      },
+    },
+
+    // -----------------------------------------------------------------
+    // Volumes — same pattern as services: create/delete the link only,
+    // every volume field (driver, driver_opts, external, labels, ...) is
+    // set afterwards via createVolumeParameter/updateVolumeParameter/
+    // deleteVolumeParameter.
+    // -----------------------------------------------------------------
+    createVolume: {
+      description: "Create and link a new volume definition to this project",
+      arguments: z.object({
+        name: z.string().min(1).describe("Volume name"),
+      }),
+      execute: async (
+        args: { name: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        const existing = await context.readResource(volumeInstance(args.name));
+        if (existing) {
+          throw new Error(`Volume '${args.name}' already exists`);
+        }
+
+        const timestamp = nowIso();
+        const volume: EntityRef = {
+          name: args.name,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const volumeHandle = await context.writeResource(
+          "volume",
+          volumeInstance(args.name),
+          volume,
+        );
+
+        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
+          | { items: EntityRef[] }
+          | null;
+        const items = [...(list?.items ?? []), volume];
+        const listHandle = await context.writeResource(
+          "volumes",
+          VOLUMES_LIST_INSTANCE,
+          { items },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [volumeHandle, listHandle, composeFileHandle] };
+      },
+    },
+
+    deleteVolume: {
+      description: "Delete a volume definition",
+      arguments: z.object({ name: z.string().describe("Volume name") }),
+      execute: async (
+        args: { name: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        const existing = await context.readResource(volumeInstance(args.name));
+        if (!existing) {
+          throw new Error(`Volume '${args.name}' not found`);
+        }
+
+        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
+          | { items: EntityRef[] }
+          | null;
+        const items = (list?.items ?? []).filter((v) => v.name !== args.name);
+        const handle = await context.writeResource(
+          "volumes",
+          VOLUMES_LIST_INSTANCE,
+          { items },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [handle, composeFileHandle] };
+      },
+    },
+
+    createVolumeParameter: {
+      description:
+        "Create a configuration parameter on a volume, validated against the active compose-spec schema",
+      arguments: z.object({
+        volumeName: z.string().describe("Volume name"),
+        key: z.string().min(1).describe("Parameter key"),
+        value: ParameterValueSchema.describe(
+          "Parameter value (string, number, boolean, null, JSON object, or JSON array)",
+        ),
+      }),
+      execute: async (
+        args: { volumeName: string; key: string; value: ParameterValue },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const volumeExists = await context.readResource(
+          volumeInstance(args.volumeName),
+        );
+        if (!volumeExists) {
+          throw new Error(`Volume '${args.volumeName}' not found`);
+        }
+        const existing = await context.readResource(
+          volumeParameterInstance(args.volumeName, args.key),
+        );
+        if (existing) {
+          throw new Error(
+            `Parameter '${args.key}' already exists on volume '${args.volumeName}'`,
+          );
+        }
+
+        const activeSchema = await getActiveComposeSchema(context);
+        validateField(activeSchema, "volume", args.key, args.value);
+
+        const timestamp = nowIso();
+        const parameter: VolumeParameter = {
+          volumeName: args.volumeName,
+          key: args.key,
+          value: args.value,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const paramHandle = await context.writeResource(
+          "volumeParameter",
+          volumeParameterInstance(args.volumeName, args.key),
+          parameter,
+        );
+
+        const listInstance = volumeParametersListInstance(args.volumeName);
+        const list = (await context.readResource(listInstance)) as
+          | { volumeName: string; parameters: VolumeParameter[] }
+          | null;
+        const parameters = [...(list?.parameters ?? []), parameter];
+        const listHandle = await context.writeResource(
+          "volumeParameters",
+          listInstance,
+          { volumeName: args.volumeName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
+      },
+    },
+
+    updateVolumeParameter: {
+      description:
+        "Update a volume configuration parameter's value, validated against the active compose-spec schema",
+      arguments: z.object({
+        volumeName: z.string().describe("Volume name"),
+        key: z.string().describe("Parameter key"),
+        value: ParameterValueSchema.describe(
+          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
+        ),
+      }),
+      execute: async (
+        args: { volumeName: string; key: string; value: ParameterValue },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const existing = await context.readResource(
+          volumeParameterInstance(args.volumeName, args.key),
+        ) as VolumeParameter | null;
+        if (!existing) {
+          throw new Error(
+            `Parameter '${args.key}' not found on volume '${args.volumeName}'`,
+          );
+        }
+
+        const activeSchema = await getActiveComposeSchema(context);
+        validateField(activeSchema, "volume", args.key, args.value);
+
+        const updated: VolumeParameter = {
+          ...existing,
+          value: args.value,
+          updatedAt: nowIso(),
+        };
+        const paramHandle = await context.writeResource(
+          "volumeParameter",
+          volumeParameterInstance(args.volumeName, args.key),
+          updated,
+        );
+
+        const listInstance = volumeParametersListInstance(args.volumeName);
+        const list = (await context.readResource(listInstance)) as
+          | { volumeName: string; parameters: VolumeParameter[] }
+          | null;
+        const parameters = (list?.parameters ?? []).map((p) =>
+          p.key === args.key ? updated : p
+        );
+        const listHandle = await context.writeResource(
+          "volumeParameters",
+          listInstance,
+          { volumeName: args.volumeName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
+      },
+    },
+
+    deleteVolumeParameter: {
+      description: "Delete a volume configuration parameter",
+      arguments: z.object({
+        volumeName: z.string().describe("Volume name"),
+        key: z.string().describe("Parameter key"),
+      }),
+      execute: async (
+        args: { volumeName: string; key: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const existing = await context.readResource(
+          volumeParameterInstance(args.volumeName, args.key),
+        );
+        if (!existing) {
+          throw new Error(
+            `Parameter '${args.key}' not found on volume '${args.volumeName}'`,
+          );
+        }
+
+        const listInstance = volumeParametersListInstance(args.volumeName);
+        const list = (await context.readResource(listInstance)) as
+          | { volumeName: string; parameters: VolumeParameter[] }
+          | null;
+        const parameters = (list?.parameters ?? []).filter((p) =>
+          p.key !== args.key
+        );
+        const handle = await context.writeResource(
+          "volumeParameters",
+          listInstance,
+          { volumeName: args.volumeName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [handle, composeFileHandle] };
+      },
+    },
+
+    // -----------------------------------------------------------------
+    // Networks — same pattern as volumes.
+    // -----------------------------------------------------------------
+    createNetwork: {
+      description: "Create and link a new network definition to this project",
+      arguments: z.object({
+        name: z.string().min(1).describe("Network name"),
+      }),
+      execute: async (
+        args: { name: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        const existing = await context.readResource(
+          networkInstance(args.name),
+        );
+        if (existing) {
+          throw new Error(`Network '${args.name}' already exists`);
+        }
+
+        const timestamp = nowIso();
+        const network: EntityRef = {
+          name: args.name,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const networkHandle = await context.writeResource(
+          "network",
+          networkInstance(args.name),
+          network,
+        );
+
+        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
+          | { items: EntityRef[] }
+          | null;
+        const items = [...(list?.items ?? []), network];
+        const listHandle = await context.writeResource(
+          "networks",
+          NETWORKS_LIST_INSTANCE,
+          { items },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return {
+          dataHandles: [networkHandle, listHandle, composeFileHandle],
+        };
+      },
+    },
+
+    deleteNetwork: {
+      description: "Delete a network definition",
+      arguments: z.object({ name: z.string().describe("Network name") }),
+      execute: async (
+        args: { name: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        const existing = await context.readResource(
+          networkInstance(args.name),
+        );
+        if (!existing) {
+          throw new Error(`Network '${args.name}' not found`);
+        }
+
+        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
+          | { items: EntityRef[] }
+          | null;
+        const items = (list?.items ?? []).filter((n) => n.name !== args.name);
+        const handle = await context.writeResource(
+          "networks",
+          NETWORKS_LIST_INSTANCE,
+          { items },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [handle, composeFileHandle] };
+      },
+    },
+
+    createNetworkParameter: {
+      description:
+        "Create a configuration parameter on a network, validated against the active compose-spec schema",
+      arguments: z.object({
+        networkName: z.string().describe("Network name"),
+        key: z.string().min(1).describe("Parameter key"),
+        value: ParameterValueSchema.describe(
+          "Parameter value (string, number, boolean, null, JSON object, or JSON array)",
+        ),
+      }),
+      execute: async (
+        args: { networkName: string; key: string; value: ParameterValue },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const networkExists = await context.readResource(
+          networkInstance(args.networkName),
+        );
+        if (!networkExists) {
+          throw new Error(`Network '${args.networkName}' not found`);
+        }
+        const existing = await context.readResource(
+          networkParameterInstance(args.networkName, args.key),
+        );
+        if (existing) {
+          throw new Error(
+            `Parameter '${args.key}' already exists on network '${args.networkName}'`,
+          );
+        }
+
+        const activeSchema = await getActiveComposeSchema(context);
+        validateField(activeSchema, "network", args.key, args.value);
+
+        const timestamp = nowIso();
+        const parameter: NetworkParameter = {
+          networkName: args.networkName,
+          key: args.key,
+          value: args.value,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const paramHandle = await context.writeResource(
+          "networkParameter",
+          networkParameterInstance(args.networkName, args.key),
+          parameter,
+        );
+
+        const listInstance = networkParametersListInstance(
+          args.networkName,
+        );
+        const list = (await context.readResource(listInstance)) as
+          | { networkName: string; parameters: NetworkParameter[] }
+          | null;
+        const parameters = [...(list?.parameters ?? []), parameter];
+        const listHandle = await context.writeResource(
+          "networkParameters",
+          listInstance,
+          { networkName: args.networkName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
+      },
+    },
+
+    updateNetworkParameter: {
+      description:
+        "Update a network configuration parameter's value, validated against the active compose-spec schema",
+      arguments: z.object({
+        networkName: z.string().describe("Network name"),
+        key: z.string().describe("Parameter key"),
+        value: ParameterValueSchema.describe(
+          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
+        ),
+      }),
+      execute: async (
+        args: { networkName: string; key: string; value: ParameterValue },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const existing = await context.readResource(
+          networkParameterInstance(args.networkName, args.key),
+        ) as NetworkParameter | null;
+        if (!existing) {
+          throw new Error(
+            `Parameter '${args.key}' not found on network '${args.networkName}'`,
+          );
+        }
+
+        const activeSchema = await getActiveComposeSchema(context);
+        validateField(activeSchema, "network", args.key, args.value);
+
+        const updated: NetworkParameter = {
+          ...existing,
+          value: args.value,
+          updatedAt: nowIso(),
+        };
+        const paramHandle = await context.writeResource(
+          "networkParameter",
+          networkParameterInstance(args.networkName, args.key),
+          updated,
+        );
+
+        const listInstance = networkParametersListInstance(
+          args.networkName,
+        );
+        const list = (await context.readResource(listInstance)) as
+          | { networkName: string; parameters: NetworkParameter[] }
+          | null;
+        const parameters = (list?.parameters ?? []).map((p) =>
+          p.key === args.key ? updated : p
+        );
+        const listHandle = await context.writeResource(
+          "networkParameters",
+          listInstance,
+          { networkName: args.networkName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
+      },
+    },
+
+    deleteNetworkParameter: {
+      description: "Delete a network configuration parameter",
+      arguments: z.object({
+        networkName: z.string().describe("Network name"),
+        key: z.string().describe("Parameter key"),
+      }),
+      execute: async (
+        args: { networkName: string; key: string },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
+      ) => {
+        assertValidParameterKey(args.key);
+        const existing = await context.readResource(
+          networkParameterInstance(args.networkName, args.key),
+        );
+        if (!existing) {
+          throw new Error(
+            `Parameter '${args.key}' not found on network '${args.networkName}'`,
+          );
+        }
+
+        const listInstance = networkParametersListInstance(
+          args.networkName,
+        );
+        const list = (await context.readResource(listInstance)) as
+          | { networkName: string; parameters: NetworkParameter[] }
+          | null;
+        const parameters = (list?.parameters ?? []).filter((p) =>
+          p.key !== args.key
+        );
+        const handle = await context.writeResource(
+          "networkParameters",
+          listInstance,
+          { networkName: args.networkName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [handle, composeFileHandle] };
       },
     },
 
     // -----------------------------------------------------------------
     // Project-level configuration parameters (key/value)
     // -----------------------------------------------------------------
-    createParameter: {
+    createProjectParameter: {
       description:
         "Create a project-level configuration parameter, validated against the active compose-spec schema",
       arguments: z.object({
@@ -1064,7 +1779,7 @@ export const model = {
         },
       ) => {
         const existing = await context.readResource(
-          parameterInstance(args.key),
+          projectParameterInstance(args.key),
         );
         if (existing) {
           throw new Error(`Parameter '${args.key}' already exists`);
@@ -1074,7 +1789,7 @@ export const model = {
         validateField(activeSchema, null, args.key, args.value);
 
         const timestamp = nowIso();
-        const parameter: Parameter = {
+        const parameter: ProjectParameter = {
           key: args.key,
           value: args.value,
           createdAt: timestamp,
@@ -1082,66 +1797,29 @@ export const model = {
         };
         const paramHandle = await context.writeResource(
           "parameter",
-          parameterInstance(args.key),
+          projectParameterInstance(args.key),
           parameter,
         );
 
-        const list = (await context.readResource(PARAMETERS_LIST_INSTANCE)) as
-          | { parameters: Parameter[] }
+        const list = (await context.readResource(
+          PROJECT_PARAMETERS_LIST_INSTANCE,
+        )) as
+          | { parameters: ProjectParameter[] }
           | null;
         const parameters = [...(list?.parameters ?? []), parameter];
         const listHandle = await context.writeResource(
           "parameters",
-          PARAMETERS_LIST_INSTANCE,
+          PROJECT_PARAMETERS_LIST_INSTANCE,
           { parameters },
         );
 
-        return { dataHandles: [paramHandle, listHandle] };
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
 
-    listParameters: {
-      description: "List project-level configuration parameters",
-      arguments: z.object({}),
-      execute: async (
-        _args: Record<string, never>,
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const list = (await context.readResource(PARAMETERS_LIST_INSTANCE)) as
-          | { parameters: Parameter[] }
-          | null;
-        const handle = await context.writeResource(
-          "parameters",
-          PARAMETERS_LIST_INSTANCE,
-          { parameters: list?.parameters ?? [] },
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    getParameter: {
-      description: "Fetch a single project-level configuration parameter",
-      arguments: z.object({ key: z.string().describe("Parameter key") }),
-      execute: async (
-        args: { key: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const parameter = await context.readResource(
-          parameterInstance(args.key),
-        );
-        if (!parameter) {
-          throw new Error(`Parameter '${args.key}' not found`);
-        }
-        const handle = await context.writeResource(
-          "parameter",
-          parameterInstance(args.key),
-          parameter,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    updateParameter: {
+    updateProjectParameter: {
       description:
         "Update a project-level configuration parameter's value, validated against the active compose-spec schema",
       arguments: z.object({
@@ -1159,8 +1837,8 @@ export const model = {
         },
       ) => {
         const existing = await context.readResource(
-          parameterInstance(args.key),
-        ) as Parameter | null;
+          projectParameterInstance(args.key),
+        ) as ProjectParameter | null;
         if (!existing) {
           throw new Error(`Parameter '${args.key}' not found`);
         }
@@ -1168,414 +1846,72 @@ export const model = {
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, null, args.key, args.value);
 
-        const updated: Parameter = {
+        const updated: ProjectParameter = {
           ...existing,
           value: args.value,
           updatedAt: nowIso(),
         };
         const paramHandle = await context.writeResource(
           "parameter",
-          parameterInstance(args.key),
+          projectParameterInstance(args.key),
           updated,
         );
 
-        const list = (await context.readResource(PARAMETERS_LIST_INSTANCE)) as
-          | { parameters: Parameter[] }
+        const list = (await context.readResource(
+          PROJECT_PARAMETERS_LIST_INSTANCE,
+        )) as
+          | { parameters: ProjectParameter[] }
           | null;
         const parameters = (list?.parameters ?? []).map((p) =>
           p.key === args.key ? updated : p
         );
         const listHandle = await context.writeResource(
           "parameters",
-          PARAMETERS_LIST_INSTANCE,
+          PROJECT_PARAMETERS_LIST_INSTANCE,
           { parameters },
         );
 
-        return { dataHandles: [paramHandle, listHandle] };
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
 
-    deleteParameter: {
+    deleteProjectParameter: {
       description: "Delete a project-level configuration parameter",
       arguments: z.object({ key: z.string().describe("Parameter key") }),
       execute: async (
         args: { key: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
+        context: {
+          writeResource: WriteResource;
+          readResource: ReadResource;
+          extensionFile: (path: string) => string;
+        },
       ) => {
         const existing = await context.readResource(
-          parameterInstance(args.key),
+          projectParameterInstance(args.key),
         );
         if (!existing) {
           throw new Error(`Parameter '${args.key}' not found`);
         }
 
-        const list = (await context.readResource(PARAMETERS_LIST_INSTANCE)) as
-          | { parameters: Parameter[] }
+        const list = (await context.readResource(
+          PROJECT_PARAMETERS_LIST_INSTANCE,
+        )) as
+          | { parameters: ProjectParameter[] }
           | null;
         const parameters = (list?.parameters ?? []).filter((p) =>
           p.key !== args.key
         );
         const handle = await context.writeResource(
           "parameters",
-          PARAMETERS_LIST_INSTANCE,
+          PROJECT_PARAMETERS_LIST_INSTANCE,
           { parameters },
         );
 
-        return { dataHandles: [handle] };
-      },
-    },
+        const composeFileHandle = await renderAndWriteComposeFile(context);
 
-    // -----------------------------------------------------------------
-    // Volume definitions
-    // -----------------------------------------------------------------
-    createVolume: {
-      description:
-        "Create a volume definition for this project, with options validated against the active compose-spec schema",
-      arguments: z.object({
-        name: z.string().min(1).describe("Volume name"),
-        options: z.record(z.string(), z.unknown()).optional().describe(
-          "Volume options (driver, driver_opts, external, labels, ...)",
-        ),
-      }),
-      execute: async (
-        args: { name: string; options?: Record<string, unknown> },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        const existing = await context.readResource(volumeInstance(args.name));
-        if (existing) {
-          throw new Error(`Volume '${args.name}' already exists`);
-        }
-
-        const options = args.options ?? {};
-        const activeSchema = await getActiveComposeSchema(context);
-        validateOptions(activeSchema, "volume", options);
-
-        const timestamp = nowIso();
-        const volume: NamedDefinition = {
-          name: args.name,
-          options,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const volumeHandle = await context.writeResource(
-          "volume",
-          volumeInstance(args.name),
-          volume,
-        );
-
-        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = [...(list?.items ?? []), volume];
-        const listHandle = await context.writeResource(
-          "volumes",
-          VOLUMES_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [volumeHandle, listHandle] };
-      },
-    },
-
-    listVolumes: {
-      description: "List volume definitions for this project",
-      arguments: z.object({}),
-      execute: async (
-        _args: Record<string, never>,
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const handle = await context.writeResource(
-          "volumes",
-          VOLUMES_LIST_INSTANCE,
-          { items: list?.items ?? [] },
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    getVolume: {
-      description: "Fetch a single volume definition",
-      arguments: z.object({ name: z.string().describe("Volume name") }),
-      execute: async (
-        args: { name: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const volume = await context.readResource(volumeInstance(args.name));
-        if (!volume) {
-          throw new Error(`Volume '${args.name}' not found`);
-        }
-        const handle = await context.writeResource(
-          "volume",
-          volumeInstance(args.name),
-          volume,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    updateVolume: {
-      description:
-        "Update a volume definition's options, validated against the active compose-spec schema",
-      arguments: z.object({
-        name: z.string().describe("Volume name"),
-        options: z.record(z.string(), z.unknown()).describe(
-          "New volume options (replaces the existing options object)",
-        ),
-      }),
-      execute: async (
-        args: { name: string; options: Record<string, unknown> },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        const existing = await context.readResource(
-          volumeInstance(args.name),
-        ) as NamedDefinition | null;
-        if (!existing) {
-          throw new Error(`Volume '${args.name}' not found`);
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateOptions(activeSchema, "volume", args.options);
-
-        const updated: NamedDefinition = {
-          ...existing,
-          options: args.options,
-          updatedAt: nowIso(),
-        };
-        const volumeHandle = await context.writeResource(
-          "volume",
-          volumeInstance(args.name),
-          updated,
-        );
-
-        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = (list?.items ?? []).map((v) =>
-          v.name === args.name ? updated : v
-        );
-        const listHandle = await context.writeResource(
-          "volumes",
-          VOLUMES_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [volumeHandle, listHandle] };
-      },
-    },
-
-    deleteVolume: {
-      description: "Delete a volume definition",
-      arguments: z.object({ name: z.string().describe("Volume name") }),
-      execute: async (
-        args: { name: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const existing = await context.readResource(volumeInstance(args.name));
-        if (!existing) {
-          throw new Error(`Volume '${args.name}' not found`);
-        }
-
-        const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = (list?.items ?? []).filter((v) => v.name !== args.name);
-        const handle = await context.writeResource(
-          "volumes",
-          VOLUMES_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [handle] };
-      },
-    },
-
-    // -----------------------------------------------------------------
-    // Network definitions
-    // -----------------------------------------------------------------
-    createNetwork: {
-      description:
-        "Create a network definition for this project, with options validated against the active compose-spec schema",
-      arguments: z.object({
-        name: z.string().min(1).describe("Network name"),
-        options: z.record(z.string(), z.unknown()).optional().describe(
-          "Network options (driver, driver_opts, external, labels, ...)",
-        ),
-      }),
-      execute: async (
-        args: { name: string; options?: Record<string, unknown> },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        const existing = await context.readResource(
-          networkInstance(args.name),
-        );
-        if (existing) {
-          throw new Error(`Network '${args.name}' already exists`);
-        }
-
-        const options = args.options ?? {};
-        const activeSchema = await getActiveComposeSchema(context);
-        validateOptions(activeSchema, "network", options);
-
-        const timestamp = nowIso();
-        const network: NamedDefinition = {
-          name: args.name,
-          options,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const networkHandle = await context.writeResource(
-          "network",
-          networkInstance(args.name),
-          network,
-        );
-
-        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = [...(list?.items ?? []), network];
-        const listHandle = await context.writeResource(
-          "networks",
-          NETWORKS_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [networkHandle, listHandle] };
-      },
-    },
-
-    listNetworks: {
-      description: "List network definitions for this project",
-      arguments: z.object({}),
-      execute: async (
-        _args: Record<string, never>,
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const handle = await context.writeResource(
-          "networks",
-          NETWORKS_LIST_INSTANCE,
-          { items: list?.items ?? [] },
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    getNetwork: {
-      description: "Fetch a single network definition",
-      arguments: z.object({ name: z.string().describe("Network name") }),
-      execute: async (
-        args: { name: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const network = await context.readResource(networkInstance(args.name));
-        if (!network) {
-          throw new Error(`Network '${args.name}' not found`);
-        }
-        const handle = await context.writeResource(
-          "network",
-          networkInstance(args.name),
-          network,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-
-    updateNetwork: {
-      description:
-        "Update a network definition's options, validated against the active compose-spec schema",
-      arguments: z.object({
-        name: z.string().describe("Network name"),
-        options: z.record(z.string(), z.unknown()).describe(
-          "New network options (replaces the existing options object)",
-        ),
-      }),
-      execute: async (
-        args: { name: string; options: Record<string, unknown> },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        const existing = await context.readResource(
-          networkInstance(args.name),
-        ) as NamedDefinition | null;
-        if (!existing) {
-          throw new Error(`Network '${args.name}' not found`);
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateOptions(activeSchema, "network", args.options);
-
-        const updated: NamedDefinition = {
-          ...existing,
-          options: args.options,
-          updatedAt: nowIso(),
-        };
-        const networkHandle = await context.writeResource(
-          "network",
-          networkInstance(args.name),
-          updated,
-        );
-
-        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = (list?.items ?? []).map((n) =>
-          n.name === args.name ? updated : n
-        );
-        const listHandle = await context.writeResource(
-          "networks",
-          NETWORKS_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [networkHandle, listHandle] };
-      },
-    },
-
-    deleteNetwork: {
-      description: "Delete a network definition",
-      arguments: z.object({ name: z.string().describe("Network name") }),
-      execute: async (
-        args: { name: string },
-        context: { writeResource: WriteResource; readResource: ReadResource },
-      ) => {
-        const existing = await context.readResource(
-          networkInstance(args.name),
-        );
-        if (!existing) {
-          throw new Error(`Network '${args.name}' not found`);
-        }
-
-        const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
-          | { items: NamedDefinition[] }
-          | null;
-        const items = (list?.items ?? []).filter((n) => n.name !== args.name);
-        const handle = await context.writeResource(
-          "networks",
-          NETWORKS_LIST_INSTANCE,
-          { items },
-        );
-
-        return { dataHandles: [handle] };
+        return { dataHandles: [handle, composeFileHandle] };
       },
     },
   },

@@ -28,6 +28,17 @@ field) is rejected at write time instead of surfacing later as a broken
   a stale or incomplete schema should never silently corrupt data, only
   decline to check it.
 
+A rendered `compose.yaml` is always kept current as the `composeFile` data
+attribute: every method that changes project structure (`importFromFile` and
+every create/update/delete method) re-renders it as part of the same call.
+You never need to call a separate render step before other code reads
+`composeFile` — it's never stale.
+
+- `renderComposeFile` still exists for forcing a fresh render with no other
+  side effect (e.g. after `updateSchema`, to re-validate the current
+  structure against a refreshed schema), but you shouldn't need it in normal
+  use.
+
 ## Setup
 
 1. Pull the extension:
@@ -50,37 +61,62 @@ field) is rejected at write time instead of surfacing later as a broken
 # (no partial writes) if the file fails schema validation.
 swamp model method run my-stack importFromFile --input path=./docker-compose.yml
 
-# Manage services
+# Manage services (create/delete only — every field lives as a parameter,
+# see below, so there's nothing else to "update" on the link itself)
 swamp model method run my-stack createService --input name=web
-swamp model method run my-stack listServices
 
 # Per-service configuration (validated against the compose-spec service schema)
 echo '{"serviceName":"web","key":"ports","value":["8080:80"]}' \
   | swamp model method run my-stack createServiceParameter --stdin
 
-# Volumes and networks
-echo '{"name":"db-data","options":{"driver":"local"}}' \
-  | swamp model method run my-stack createVolume --stdin
+# Volumes and networks follow the identical create/delete + parameter
+# pattern as services
+swamp model method run my-stack createVolume --input name=db-data
+echo '{"volumeName":"db-data","key":"driver","value":"local"}' \
+  | swamp model method run my-stack createVolumeParameter --stdin
+
+swamp model method run my-stack createNetwork --input name=backend
+echo '{"networkName":"backend","key":"driver","value":"bridge"}' \
+  | swamp model method run my-stack createNetworkParameter --stdin
 
 # Project-level parameters (version, configs, secrets, x-* extensions, ...)
 echo '{"key":"version","value":"3.9"}' \
-  | swamp model method run my-stack createParameter --stdin
+  | swamp model method run my-stack createProjectParameter --stdin
 
 # Refresh the compose-spec schema from upstream when you need a newer field
 swamp model method run my-stack updateSchema --verbose
+
+# composeFile is already current after any of the calls above — read it directly
+swamp data get my-stack composeFile --json
+
+# Force a fresh render with no other side effect (e.g. right after updateSchema)
+swamp model method run my-stack renderComposeFile
+
+# No dedicated get/list methods — read model data directly
+swamp data get my-stack service-web --json
+swamp data list my-stack
 ```
 
 ## Methods
 
+Services, volumes, and networks all follow the same pattern: create/delete
+the link, then create/update/delete its fields one key at a time as
+parameters (validated against the compose-spec definition for that kind).
+There are no `get`/`list` methods — use `swamp data get` / `swamp data list`
+to read model data directly.
+
 | Method                                                                 | Description                                                                    |
 | ----------------------------------------------------------------------| ------------------------------------------------------------------------------|
 | `updateSchema`                                                        | Fetch and cache the latest compose-spec schema from compose-go                |
-| `importFromFile`                                                      | Bulk import services/volumes/networks/parameters from a compose file          |
-| `createService` / `listServices` / `getService` / `updateService` / `deleteService` | Manage services linked to the project                           |
-| `createServiceParameter` / `listServiceParameters` / `getServiceParameter` / `updateServiceParameter` / `deleteServiceParameter` | Per-service key/value configuration |
-| `createVolume` / `listVolumes` / `getVolume` / `updateVolume` / `deleteVolume` | Volume definitions                                              |
-| `createNetwork` / `listNetworks` / `getNetwork` / `updateNetwork` / `deleteNetwork` | Network definitions                                         |
-| `createParameter` / `listParameters` / `getParameter` / `updateParameter` / `deleteParameter` | Project-level key/value configuration              |
+| `importFromFile`                                                      | Bulk import services/volumes/networks/parameters from a compose file, validated against the active schema before any write |
+| `renderComposeFile`                                                   | Force a fresh compose.yaml render with no other side effect — every mutating method already does this automatically |
+| `createService` / `deleteService`                                     | Link/unlink a service                                                          |
+| `createServiceParameter` / `updateServiceParameter` / `deleteServiceParameter` | Per-service key/value configuration                                  |
+| `createVolume` / `deleteVolume`                                       | Link/unlink a volume definition                                                |
+| `createVolumeParameter` / `updateVolumeParameter` / `deleteVolumeParameter` | Per-volume key/value configuration                                        |
+| `createNetwork` / `deleteNetwork`                                     | Link/unlink a network definition                                               |
+| `createNetworkParameter` / `updateNetworkParameter` / `deleteNetworkParameter` | Per-network key/value configuration                                  |
+| `createProjectParameter` / `updateProjectParameter` / `deleteProjectParameter` | Project-level (top-of-document) key/value configuration              |
 
 ## Global Arguments
 
@@ -94,10 +130,13 @@ swamp model method run my-stack updateSchema --verbose
 | ---------------------------------------| ---------------------------------------------------------|
 | `services` / `service`                 | Linked services (list + per-service record)             |
 | `serviceParameters` / `serviceParameter`| Per-service key/value configuration                      |
-| `volumes` / `volume`                   | Volume definitions                                       |
-| `networks` / `network`                 | Network definitions                                      |
+| `volumes` / `volume`                   | Linked volumes (list + per-volume record)                |
+| `volumeParameters` / `volumeParameter`  | Per-volume key/value configuration                       |
+| `networks` / `network`                 | Linked networks (list + per-network record)              |
+| `networkParameters` / `networkParameter`| Per-network key/value configuration                      |
 | `parameters` / `parameter`             | Project-level key/value configuration                    |
 | `composeSchema`                        | Active compose-spec schema cache (written by updateSchema)|
+| `composeFile`                           | Rendered compose.yaml document — kept current automatically by every mutating method|
 
 ## License
 

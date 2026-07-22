@@ -88,17 +88,6 @@ export function validateField(
   }
 }
 
-/** Validate every entry of an options bag (volume/network options) in one call. */
-export function validateOptions(
-  schemaDoc: Record<string, unknown>,
-  defName: ComposeDefName,
-  options: Record<string, unknown>,
-): void {
-  for (const [key, value] of Object.entries(options)) {
-    validateField(schemaDoc, defName, key, value);
-  }
-}
-
 /**
  * Validate a whole parsed compose document (as imported from a
  * compose.yaml/docker-compose.yml file) against the full schema in one
