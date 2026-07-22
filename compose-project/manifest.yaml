@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@shelson/compose-project"
-version: "2026.07.23.5"
+version: "2026.07.23.6"
 description: >
   Tracks a Docker Compose project's structure (services, volumes, networks)
   and flexible key/value configuration as swamp-managed data. Data-only —

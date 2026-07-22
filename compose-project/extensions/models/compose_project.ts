@@ -495,8 +495,63 @@ async function renderAndWriteComposeFile(
 /** Docker Compose project model definition — structure and configuration only. */
 export const model = {
   type: "@shelson/compose/project",
-  version: "2026.07.23.5",
+  version: "2026.07.23.6",
   globalArguments: GlobalArgsSchema,
+
+  checks: {
+    "valid-project-name": {
+      description:
+        "Ensure projectName is a valid Docker Compose project name (lowercase letters, digits, dashes, underscores; must start with a letter or digit) before any data is written under it",
+      labels: ["policy"],
+      execute: (
+        context: { globalArgs: GlobalArgs },
+      ): { pass: boolean; errors?: string[] } => {
+        const name = context.globalArgs.projectName;
+        if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) {
+          return {
+            pass: false,
+            errors: [
+              `projectName '${name}' is not a valid Compose project name — must start with a lowercase letter or digit and contain only lowercase letters, digits, dashes, and underscores`,
+            ],
+          };
+        }
+        return { pass: true };
+      },
+    },
+    "compose-spec-reachable": {
+      description:
+        "Verify the canonical compose-spec repository is reachable before updateSchema attempts to fetch a refreshed schema",
+      labels: ["live"],
+      appliesTo: ["updateSchema"],
+      execute: async (
+        _context: unknown,
+      ): Promise<{ pass: boolean; errors?: string[] }> => {
+        try {
+          const response = await fetch(COMPOSE_SPEC_SCHEMA_URL, {
+            method: "HEAD",
+          });
+          if (!response.ok) {
+            return {
+              pass: false,
+              errors: [
+                `compose-spec repository responded with HTTP ${response.status}`,
+              ],
+            };
+          }
+          return { pass: true };
+        } catch (err) {
+          return {
+            pass: false,
+            errors: [
+              `Could not reach compose-spec repository: ${
+                (err as Error).message
+              }`,
+            ],
+          };
+        }
+      },
+    },
+  },
 
   resources: {
     "services": {

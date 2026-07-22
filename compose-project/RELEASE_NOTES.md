@@ -1,3 +1,37 @@
+## 2026.07.23.6
+
+**Changed:** `createServiceParameter`/`updateServiceParameter` (and the
+volume/network/project equivalents) are collapsed into a single
+`setServiceParameter`/`setVolumeParameter`/`setNetworkParameter`/`setProjectParameter`
+upsert each — same schema validation, but no more picking the right verb for
+whether the key already exists. `importFromFile` now calls the same upsert
+primitive internally instead of a separate hand-rolled copy of the same
+logic. Every `delete*` method (services, volumes, networks, and their
+parameters) now succeeds as a no-op when the target is already gone instead
+of throwing — safe to retry after a partial failure.
+`createService`/`createVolume`/`createNetwork` are unchanged: still reject a
+duplicate name.
+
+**Fixed:** Service/volume/network names containing `::` could collide with
+the internal parameter-instance storage path for a same-prefixed entity
+(e.g. a service literally named `web::__params__` would silently overwrite
+the parameter list of a service named `web`). Names containing `::` are now
+rejected on `createService`/`createVolume`/`createNetwork` and up front in
+`importFromFile`.
+
+**Added:** Every method now logs on entry and on completion (previously only
+4 of the methods logged anything, and only on completion). Two pre-flight
+checks: `valid-project-name` (policy) rejects an invalid
+`COMPOSE_PROJECT_NAME` before any data is written under it, and
+`compose-spec-reachable` (live, `updateSchema` only) verifies the
+compose-spec repository is reachable before attempting a schema refresh —
+skip it in offline/CI environments with `--skip-check-label live`. Unit
+test coverage via `@systeminit/swamp-testing` (previously none).
+
+**Upgrade note:** No `upgrades` entry — `globalArguments` hasn't changed,
+and this extension has never been published, so there are no existing
+instances at an older `typeVersion` to migrate.
+
 ## 2026.07.23.5
 
 **Changed:** Collapsed the method surface from 28 methods to 21.

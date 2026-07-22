@@ -763,3 +763,69 @@ Deno.test("every mutating method logs both an entry and a completion message", a
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Pre-flight checks
+// ---------------------------------------------------------------------------
+
+Deno.test("valid-project-name check: passes for a valid project name", async () => {
+  const result = await model.checks["valid-project-name"].execute(
+    // deno-lint-ignore no-explicit-any
+    { globalArgs: { projectName: "my-stack_1" } } as any,
+  );
+  assertEquals(result.pass, true);
+});
+
+Deno.test("valid-project-name check: fails on uppercase characters", async () => {
+  const result = await model.checks["valid-project-name"].execute(
+    // deno-lint-ignore no-explicit-any
+    { globalArgs: { projectName: "MyStack" } } as any,
+  );
+  assertEquals(result.pass, false);
+});
+
+Deno.test("valid-project-name check: fails when it starts with a dash", async () => {
+  const result = await model.checks["valid-project-name"].execute(
+    // deno-lint-ignore no-explicit-any
+    { globalArgs: { projectName: "-my-stack" } } as any,
+  );
+  assertEquals(result.pass, false);
+});
+
+Deno.test("compose-spec-reachable check: passes when the host responds ok", async () => {
+  const { result } = await withMockedFetch(
+    [new Response(null, { status: 200 })],
+    () =>
+      model.checks["compose-spec-reachable"].execute(
+        // deno-lint-ignore no-explicit-any
+        {} as any,
+      ),
+  );
+  assertEquals(result.pass, true);
+});
+
+Deno.test("compose-spec-reachable check: fails when the host errors", async () => {
+  const { result } = await withMockedFetch(
+    [new Response(null, { status: 503 })],
+    () =>
+      model.checks["compose-spec-reachable"].execute(
+        // deno-lint-ignore no-explicit-any
+        {} as any,
+      ),
+  );
+  assertEquals(result.pass, false);
+});
+
+Deno.test("compose-spec-reachable check: fails when fetch throws (offline)", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new Error("network unreachable"));
+  try {
+    const result = await model.checks["compose-spec-reachable"].execute(
+      // deno-lint-ignore no-explicit-any
+      {} as any,
+    );
+    assertEquals(result.pass, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -41,17 +41,17 @@ You never need to call a separate render step before other code reads
 
 ## Setup
 
-1. Pull the extension:
+**1. Pull the extension:**
 
-   ```bash
-   swamp extension pull @shelson/compose-project
-   ```
+```bash
+swamp extension pull @shelson/compose-project
+```
 
-2. Create a project instance:
+**2. Create a project instance:**
 
-   ```bash
-   swamp model create @shelson/compose/project my-stack --global-arg projectName=my-stack
-   ```
+```bash
+swamp model create @shelson/compose/project my-stack --global-arg projectName=my-stack
+```
 
 ## Usage
 
