@@ -208,6 +208,24 @@ function assertValidParameterKey(key: string): void {
   }
 }
 
+// Entity instance names (service-${name}, volume-${name}, network-${name})
+// share a storage namespace with their own "::"-delimited sub-instances
+// (service-${name}::__params__, service-${name}::${key}, ...). A name
+// containing "::" can be crafted to collide with another entity's
+// parameter-list or parameter instance — e.g. a service literally named
+// "web::__params__" collides with the parameter-list instance of a service
+// named "web" — silently overwriting the wrong resource on write. Rejecting
+// "::" in names (parameter keys may still contain it freely) keeps the
+// delimiter unambiguous: the first "::" after the prefix always marks the
+// end of the name.
+function assertValidEntityName(kind: string, name: string): void {
+  if (name.includes("::")) {
+    throw new Error(
+      `${kind} name '${name}' must not contain '::' (reserved as the internal parameter-instance delimiter)`,
+    );
+  }
+}
+
 type WriteResource = (
   specName: string,
   name: string,
@@ -216,6 +234,9 @@ type WriteResource = (
 type ReadResource = (
   instanceName: string,
 ) => Promise<Record<string, unknown> | null>;
+type Logger = {
+  info: (msg: string, props: Record<string, unknown>) => void;
+};
 
 function resolveComposeFilePath(path: string, repoDir: string): string {
   return isAbsolute(path) ? path : join(repoDir, path);
@@ -239,6 +260,111 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+// Write a single parameter record, preserving createdAt across repeat
+// writes to the same key. Shared by the setXParameter methods (single-key
+// upsert) and importFromFile (bulk upsert) so the "what does it mean to set
+// one parameter" logic exists in exactly one place. List-level merging is
+// deliberately left to each call site, since a single `set*` call and a
+// bulk import legitimately want different list-write shapes (one merged
+// write per key vs. one merged write per whole import).
+async function writeServiceParameterRecord(
+  context: { readResource: ReadResource; writeResource: WriteResource },
+  serviceName: string,
+  key: string,
+  value: ParameterValue,
+  timestamp: string,
+): Promise<{ handle: { name: string }; parameter: ServiceParameter }> {
+  const existing = await context.readResource(
+    serviceParameterInstance(serviceName, key),
+  ) as ServiceParameter | null;
+  const parameter: ServiceParameter = {
+    serviceName,
+    key,
+    value,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+  const handle = await context.writeResource(
+    "serviceParameter",
+    serviceParameterInstance(serviceName, key),
+    parameter,
+  );
+  return { handle, parameter };
+}
+
+async function writeVolumeParameterRecord(
+  context: { readResource: ReadResource; writeResource: WriteResource },
+  volumeName: string,
+  key: string,
+  value: ParameterValue,
+  timestamp: string,
+): Promise<{ handle: { name: string }; parameter: VolumeParameter }> {
+  const existing = await context.readResource(
+    volumeParameterInstance(volumeName, key),
+  ) as VolumeParameter | null;
+  const parameter: VolumeParameter = {
+    volumeName,
+    key,
+    value,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+  const handle = await context.writeResource(
+    "volumeParameter",
+    volumeParameterInstance(volumeName, key),
+    parameter,
+  );
+  return { handle, parameter };
+}
+
+async function writeNetworkParameterRecord(
+  context: { readResource: ReadResource; writeResource: WriteResource },
+  networkName: string,
+  key: string,
+  value: ParameterValue,
+  timestamp: string,
+): Promise<{ handle: { name: string }; parameter: NetworkParameter }> {
+  const existing = await context.readResource(
+    networkParameterInstance(networkName, key),
+  ) as NetworkParameter | null;
+  const parameter: NetworkParameter = {
+    networkName,
+    key,
+    value,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+  const handle = await context.writeResource(
+    "networkParameter",
+    networkParameterInstance(networkName, key),
+    parameter,
+  );
+  return { handle, parameter };
+}
+
+async function writeProjectParameterRecord(
+  context: { readResource: ReadResource; writeResource: WriteResource },
+  key: string,
+  value: ParameterValue,
+  timestamp: string,
+): Promise<{ handle: { name: string }; parameter: ProjectParameter }> {
+  const existing = await context.readResource(
+    projectParameterInstance(key),
+  ) as ProjectParameter | null;
+  const parameter: ProjectParameter = {
+    key,
+    value,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+  const handle = await context.writeResource(
+    "parameter",
+    projectParameterInstance(key),
+    parameter,
+  );
+  return { handle, parameter };
 }
 
 /**
@@ -487,11 +613,13 @@ export const model = {
         _args: Record<string, never>,
         context: {
           writeResource: WriteResource;
-          logger: {
-            info: (msg: string, props: Record<string, unknown>) => void;
-          };
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Fetching compose-spec schema from {source}", {
+          source: COMPOSE_SPEC_SCHEMA_URL,
+        });
+
         const response = await fetch(COMPOSE_SPEC_SCHEMA_URL);
         if (!response.ok) {
           throw new Error(
@@ -556,12 +684,14 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
-          logger: {
-            info: (msg: string, props: Record<string, unknown>) => void;
-          };
+          logger: Logger;
         },
       ) => {
         const filePath = resolveComposeFilePath(args.path, context.repoDir);
+
+        context.logger.info("Importing compose file {file}", {
+          file: filePath,
+        });
 
         let raw: string;
         try {
@@ -601,6 +731,20 @@ export const model = {
             throw new Error(`'${filePath}' ${err.message}`);
           }
           throw err;
+        }
+
+        // Also reject entity names that would collide with the internal
+        // "::"-delimited parameter-instance namespace (see
+        // assertValidEntityName) — before any writes, same as the schema
+        // check above.
+        for (const serviceName of Object.keys(asRecord(compose.services))) {
+          assertValidEntityName("Service", serviceName);
+        }
+        for (const volumeName of Object.keys(asRecord(compose.volumes))) {
+          assertValidEntityName("Volume", volumeName);
+        }
+        for (const networkName of Object.keys(asRecord(compose.networks))) {
+          assertValidEntityName("Network", networkName);
         }
 
         const timestamp = nowIso();
@@ -648,23 +792,14 @@ export const model = {
               );
               continue;
             }
-            const existingParam = await context.readResource(
-              serviceParameterInstance(serviceName, key),
-            ) as ServiceParameter | null;
-            const parameter: ServiceParameter = {
+            const { handle, parameter } = await writeServiceParameterRecord(
+              context,
               serviceName,
               key,
-              value: value as ParameterValue,
-              createdAt: existingParam?.createdAt ?? timestamp,
-              updatedAt: timestamp,
-            };
-            handles.push(
-              await context.writeResource(
-                "serviceParameter",
-                serviceParameterInstance(serviceName, key),
-                parameter,
-              ),
+              value as ParameterValue,
+              timestamp,
             );
+            handles.push(handle);
             importedServiceParams.push(parameter);
           }
 
@@ -736,23 +871,14 @@ export const model = {
               );
               continue;
             }
-            const existingParam = await context.readResource(
-              volumeParameterInstance(volumeName, key),
-            ) as VolumeParameter | null;
-            const parameter: VolumeParameter = {
+            const { handle, parameter } = await writeVolumeParameterRecord(
+              context,
               volumeName,
               key,
-              value: value as ParameterValue,
-              createdAt: existingParam?.createdAt ?? timestamp,
-              updatedAt: timestamp,
-            };
-            handles.push(
-              await context.writeResource(
-                "volumeParameter",
-                volumeParameterInstance(volumeName, key),
-                parameter,
-              ),
+              value as ParameterValue,
+              timestamp,
             );
+            handles.push(handle);
             importedVolumeParams.push(parameter);
           }
 
@@ -824,23 +950,14 @@ export const model = {
               );
               continue;
             }
-            const existingParam = await context.readResource(
-              networkParameterInstance(networkName, key),
-            ) as NetworkParameter | null;
-            const parameter: NetworkParameter = {
+            const { handle, parameter } = await writeNetworkParameterRecord(
+              context,
               networkName,
               key,
-              value: value as ParameterValue,
-              createdAt: existingParam?.createdAt ?? timestamp,
-              updatedAt: timestamp,
-            };
-            handles.push(
-              await context.writeResource(
-                "networkParameter",
-                networkParameterInstance(networkName, key),
-                parameter,
-              ),
+              value as ParameterValue,
+              timestamp,
             );
+            handles.push(handle);
             importedNetworkParams.push(parameter);
           }
 
@@ -880,22 +997,13 @@ export const model = {
 
         for (const [key, value] of Object.entries(compose)) {
           if (structuralKeys.has(key)) continue;
-          const existingParam = await context.readResource(
-            projectParameterInstance(key),
-          ) as ProjectParameter | null;
-          const parameter: ProjectParameter = {
+          const { handle, parameter } = await writeProjectParameterRecord(
+            context,
             key,
-            value: value as ParameterValue,
-            createdAt: existingParam?.createdAt ?? timestamp,
-            updatedAt: timestamp,
-          };
-          handles.push(
-            await context.writeResource(
-              "parameter",
-              projectParameterInstance(key),
-              parameter,
-            ),
+            value as ParameterValue,
+            timestamp,
           );
+          handles.push(handle);
           importedParameters.push(parameter);
         }
 
@@ -946,9 +1054,12 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Rendering compose file", {});
         const handle = await renderAndWriteComposeFile(context);
+        context.logger.info("Rendered compose file", {});
         return { dataHandles: [handle] };
       },
     },
@@ -974,11 +1085,12 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
-          logger: {
-            info: (msg: string, props: Record<string, unknown>) => void;
-          };
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Creating service {name}", { name: args.name });
+
+        assertValidEntityName("Service", args.name);
         const existing = await context.readResource(
           serviceInstance(args.name),
         );
@@ -1028,17 +1140,10 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
-          logger: {
-            info: (msg: string, props: Record<string, unknown>) => void;
-          };
+          logger: Logger;
         },
       ) => {
-        const existing = await context.readResource(
-          serviceInstance(args.name),
-        );
-        if (!existing) {
-          throw new Error(`Service '${args.name}' not found`);
-        }
+        context.logger.info("Deleting service {name}", { name: args.name });
 
         const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
           | { services: EntityRef[] }
@@ -1065,9 +1170,9 @@ export const model = {
     // -----------------------------------------------------------------
     // Service-level configuration parameters (key/value, per service)
     // -----------------------------------------------------------------
-    createServiceParameter: {
+    setServiceParameter: {
       description:
-        "Create a configuration parameter on a service, validated against the active compose-spec schema",
+        "Create or update a configuration parameter on a service (upsert), validated against the active compose-spec schema",
       arguments: z.object({
         serviceName: z.string().describe("Service name"),
         key: z.string().min(1).describe("Parameter key"),
@@ -1081,8 +1186,14 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Setting parameter {key} on service {service}", {
+          key: args.key,
+          service: args.serviceName,
+        });
+
         assertValidParameterKey(args.key);
         const serviceExists = await context.readResource(
           serviceInstance(args.serviceName),
@@ -1090,106 +1201,40 @@ export const model = {
         if (!serviceExists) {
           throw new Error(`Service '${args.serviceName}' not found`);
         }
-        const existing = await context.readResource(
-          serviceParameterInstance(args.serviceName, args.key),
-        );
-        if (existing) {
-          throw new Error(
-            `Parameter '${args.key}' already exists on service '${args.serviceName}'`,
-          );
-        }
 
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "service", args.key, args.value);
 
-        const timestamp = nowIso();
-        const parameter: ServiceParameter = {
-          serviceName: args.serviceName,
+        const { handle: paramHandle, parameter } =
+          await writeServiceParameterRecord(
+            context,
+            args.serviceName,
+            args.key,
+            args.value,
+            nowIso(),
+          );
+
+        const listInstance = serviceParametersListInstance(args.serviceName);
+        const list = (await context.readResource(listInstance)) as
+          | { serviceName: string; parameters: ServiceParameter[] }
+          | null;
+        const parameters = mergeByKey(
+          list?.parameters ?? [],
+          [parameter],
+          (p) => p.key,
+        );
+        const listHandle = await context.writeResource(
+          "serviceParameters",
+          listInstance,
+          { serviceName: args.serviceName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        context.logger.info("Set parameter {key} on service {service}", {
           key: args.key,
-          value: args.value,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const paramHandle = await context.writeResource(
-          "serviceParameter",
-          serviceParameterInstance(args.serviceName, args.key),
-          parameter,
-        );
-
-        const listInstance = serviceParametersListInstance(args.serviceName);
-        const list = (await context.readResource(listInstance)) as
-          | { serviceName: string; parameters: ServiceParameter[] }
-          | null;
-        const parameters = [...(list?.parameters ?? []), parameter];
-        const listHandle = await context.writeResource(
-          "serviceParameters",
-          listInstance,
-          { serviceName: args.serviceName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
-        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
-      },
-    },
-
-    updateServiceParameter: {
-      description:
-        "Update a service configuration parameter's value, validated against the active compose-spec schema",
-      arguments: z.object({
-        serviceName: z.string().describe("Service name"),
-        key: z.string().describe("Parameter key"),
-        value: ParameterValueSchema.describe(
-          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
-        ),
-      }),
-      execute: async (
-        args: { serviceName: string; key: string; value: ParameterValue },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          serviceParameterInstance(args.serviceName, args.key),
-        ) as ServiceParameter | null;
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on service '${args.serviceName}'`,
-          );
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateField(activeSchema, "service", args.key, args.value);
-
-        const updated: ServiceParameter = {
-          ...existing,
-          value: args.value,
-          updatedAt: nowIso(),
-        };
-        const paramHandle = await context.writeResource(
-          "serviceParameter",
-          serviceParameterInstance(args.serviceName, args.key),
-          updated,
-        );
-
-        const listInstance = serviceParametersListInstance(args.serviceName);
-        const list = (await context.readResource(listInstance)) as
-          | { serviceName: string; parameters: ServiceParameter[] }
-          | null;
-        const parameters = (list?.parameters ?? []).map((p) =>
-          p.key === args.key ? updated : p
-        );
-        const listHandle = await context.writeResource(
-          "serviceParameters",
-          listInstance,
-          { serviceName: args.serviceName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
+          service: args.serviceName,
+        });
         return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
@@ -1206,17 +1251,15 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          serviceParameterInstance(args.serviceName, args.key),
+        context.logger.info(
+          "Deleting parameter {key} from service {service}",
+          { key: args.key, service: args.serviceName },
         );
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on service '${args.serviceName}'`,
-          );
-        }
+
+        assertValidParameterKey(args.key);
 
         const listInstance = serviceParametersListInstance(args.serviceName);
         const list = (await context.readResource(listInstance)) as
@@ -1233,6 +1276,10 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Deleted parameter {key} from service {service}", {
+          key: args.key,
+          service: args.serviceName,
+        });
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
@@ -1254,8 +1301,12 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Creating volume {name}", { name: args.name });
+
+        assertValidEntityName("Volume", args.name);
         const existing = await context.readResource(volumeInstance(args.name));
         if (existing) {
           throw new Error(`Volume '${args.name}' already exists`);
@@ -1285,6 +1336,7 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Created volume {name}", { name: args.name });
         return { dataHandles: [volumeHandle, listHandle, composeFileHandle] };
       },
     },
@@ -1298,12 +1350,10 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        const existing = await context.readResource(volumeInstance(args.name));
-        if (!existing) {
-          throw new Error(`Volume '${args.name}' not found`);
-        }
+        context.logger.info("Deleting volume {name}", { name: args.name });
 
         const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
           | { items: EntityRef[] }
@@ -1317,13 +1367,14 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Deleted volume {name}", { name: args.name });
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
 
-    createVolumeParameter: {
+    setVolumeParameter: {
       description:
-        "Create a configuration parameter on a volume, validated against the active compose-spec schema",
+        "Create or update a configuration parameter on a volume (upsert), validated against the active compose-spec schema",
       arguments: z.object({
         volumeName: z.string().describe("Volume name"),
         key: z.string().min(1).describe("Parameter key"),
@@ -1337,8 +1388,14 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Setting parameter {key} on volume {volume}", {
+          key: args.key,
+          volume: args.volumeName,
+        });
+
         assertValidParameterKey(args.key);
         const volumeExists = await context.readResource(
           volumeInstance(args.volumeName),
@@ -1346,106 +1403,40 @@ export const model = {
         if (!volumeExists) {
           throw new Error(`Volume '${args.volumeName}' not found`);
         }
-        const existing = await context.readResource(
-          volumeParameterInstance(args.volumeName, args.key),
-        );
-        if (existing) {
-          throw new Error(
-            `Parameter '${args.key}' already exists on volume '${args.volumeName}'`,
-          );
-        }
 
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "volume", args.key, args.value);
 
-        const timestamp = nowIso();
-        const parameter: VolumeParameter = {
-          volumeName: args.volumeName,
+        const { handle: paramHandle, parameter } =
+          await writeVolumeParameterRecord(
+            context,
+            args.volumeName,
+            args.key,
+            args.value,
+            nowIso(),
+          );
+
+        const listInstance = volumeParametersListInstance(args.volumeName);
+        const list = (await context.readResource(listInstance)) as
+          | { volumeName: string; parameters: VolumeParameter[] }
+          | null;
+        const parameters = mergeByKey(
+          list?.parameters ?? [],
+          [parameter],
+          (p) => p.key,
+        );
+        const listHandle = await context.writeResource(
+          "volumeParameters",
+          listInstance,
+          { volumeName: args.volumeName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        context.logger.info("Set parameter {key} on volume {volume}", {
           key: args.key,
-          value: args.value,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const paramHandle = await context.writeResource(
-          "volumeParameter",
-          volumeParameterInstance(args.volumeName, args.key),
-          parameter,
-        );
-
-        const listInstance = volumeParametersListInstance(args.volumeName);
-        const list = (await context.readResource(listInstance)) as
-          | { volumeName: string; parameters: VolumeParameter[] }
-          | null;
-        const parameters = [...(list?.parameters ?? []), parameter];
-        const listHandle = await context.writeResource(
-          "volumeParameters",
-          listInstance,
-          { volumeName: args.volumeName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
-        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
-      },
-    },
-
-    updateVolumeParameter: {
-      description:
-        "Update a volume configuration parameter's value, validated against the active compose-spec schema",
-      arguments: z.object({
-        volumeName: z.string().describe("Volume name"),
-        key: z.string().describe("Parameter key"),
-        value: ParameterValueSchema.describe(
-          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
-        ),
-      }),
-      execute: async (
-        args: { volumeName: string; key: string; value: ParameterValue },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          volumeParameterInstance(args.volumeName, args.key),
-        ) as VolumeParameter | null;
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on volume '${args.volumeName}'`,
-          );
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateField(activeSchema, "volume", args.key, args.value);
-
-        const updated: VolumeParameter = {
-          ...existing,
-          value: args.value,
-          updatedAt: nowIso(),
-        };
-        const paramHandle = await context.writeResource(
-          "volumeParameter",
-          volumeParameterInstance(args.volumeName, args.key),
-          updated,
-        );
-
-        const listInstance = volumeParametersListInstance(args.volumeName);
-        const list = (await context.readResource(listInstance)) as
-          | { volumeName: string; parameters: VolumeParameter[] }
-          | null;
-        const parameters = (list?.parameters ?? []).map((p) =>
-          p.key === args.key ? updated : p
-        );
-        const listHandle = await context.writeResource(
-          "volumeParameters",
-          listInstance,
-          { volumeName: args.volumeName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
+          volume: args.volumeName,
+        });
         return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
@@ -1462,17 +1453,15 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Deleting parameter {key} from volume {volume}", {
+          key: args.key,
+          volume: args.volumeName,
+        });
+
         assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          volumeParameterInstance(args.volumeName, args.key),
-        );
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on volume '${args.volumeName}'`,
-          );
-        }
 
         const listInstance = volumeParametersListInstance(args.volumeName);
         const list = (await context.readResource(listInstance)) as
@@ -1489,6 +1478,10 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Deleted parameter {key} from volume {volume}", {
+          key: args.key,
+          volume: args.volumeName,
+        });
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
@@ -1507,8 +1500,12 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Creating network {name}", { name: args.name });
+
+        assertValidEntityName("Network", args.name);
         const existing = await context.readResource(
           networkInstance(args.name),
         );
@@ -1540,6 +1537,7 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Created network {name}", { name: args.name });
         return {
           dataHandles: [networkHandle, listHandle, composeFileHandle],
         };
@@ -1555,14 +1553,10 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        const existing = await context.readResource(
-          networkInstance(args.name),
-        );
-        if (!existing) {
-          throw new Error(`Network '${args.name}' not found`);
-        }
+        context.logger.info("Deleting network {name}", { name: args.name });
 
         const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
           | { items: EntityRef[] }
@@ -1576,13 +1570,14 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Deleted network {name}", { name: args.name });
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
 
-    createNetworkParameter: {
+    setNetworkParameter: {
       description:
-        "Create a configuration parameter on a network, validated against the active compose-spec schema",
+        "Create or update a configuration parameter on a network (upsert), validated against the active compose-spec schema",
       arguments: z.object({
         networkName: z.string().describe("Network name"),
         key: z.string().min(1).describe("Parameter key"),
@@ -1596,8 +1591,14 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
+        context.logger.info("Setting parameter {key} on network {network}", {
+          key: args.key,
+          network: args.networkName,
+        });
+
         assertValidParameterKey(args.key);
         const networkExists = await context.readResource(
           networkInstance(args.networkName),
@@ -1605,110 +1606,42 @@ export const model = {
         if (!networkExists) {
           throw new Error(`Network '${args.networkName}' not found`);
         }
-        const existing = await context.readResource(
-          networkParameterInstance(args.networkName, args.key),
-        );
-        if (existing) {
-          throw new Error(
-            `Parameter '${args.key}' already exists on network '${args.networkName}'`,
-          );
-        }
 
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "network", args.key, args.value);
 
-        const timestamp = nowIso();
-        const parameter: NetworkParameter = {
-          networkName: args.networkName,
+        const { handle: paramHandle, parameter } =
+          await writeNetworkParameterRecord(
+            context,
+            args.networkName,
+            args.key,
+            args.value,
+            nowIso(),
+          );
+
+        const listInstance = networkParametersListInstance(
+          args.networkName,
+        );
+        const list = (await context.readResource(listInstance)) as
+          | { networkName: string; parameters: NetworkParameter[] }
+          | null;
+        const parameters = mergeByKey(
+          list?.parameters ?? [],
+          [parameter],
+          (p) => p.key,
+        );
+        const listHandle = await context.writeResource(
+          "networkParameters",
+          listInstance,
+          { networkName: args.networkName, parameters },
+        );
+
+        const composeFileHandle = await renderAndWriteComposeFile(context);
+
+        context.logger.info("Set parameter {key} on network {network}", {
           key: args.key,
-          value: args.value,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const paramHandle = await context.writeResource(
-          "networkParameter",
-          networkParameterInstance(args.networkName, args.key),
-          parameter,
-        );
-
-        const listInstance = networkParametersListInstance(
-          args.networkName,
-        );
-        const list = (await context.readResource(listInstance)) as
-          | { networkName: string; parameters: NetworkParameter[] }
-          | null;
-        const parameters = [...(list?.parameters ?? []), parameter];
-        const listHandle = await context.writeResource(
-          "networkParameters",
-          listInstance,
-          { networkName: args.networkName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
-        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
-      },
-    },
-
-    updateNetworkParameter: {
-      description:
-        "Update a network configuration parameter's value, validated against the active compose-spec schema",
-      arguments: z.object({
-        networkName: z.string().describe("Network name"),
-        key: z.string().describe("Parameter key"),
-        value: ParameterValueSchema.describe(
-          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
-        ),
-      }),
-      execute: async (
-        args: { networkName: string; key: string; value: ParameterValue },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          networkParameterInstance(args.networkName, args.key),
-        ) as NetworkParameter | null;
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on network '${args.networkName}'`,
-          );
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateField(activeSchema, "network", args.key, args.value);
-
-        const updated: NetworkParameter = {
-          ...existing,
-          value: args.value,
-          updatedAt: nowIso(),
-        };
-        const paramHandle = await context.writeResource(
-          "networkParameter",
-          networkParameterInstance(args.networkName, args.key),
-          updated,
-        );
-
-        const listInstance = networkParametersListInstance(
-          args.networkName,
-        );
-        const list = (await context.readResource(listInstance)) as
-          | { networkName: string; parameters: NetworkParameter[] }
-          | null;
-        const parameters = (list?.parameters ?? []).map((p) =>
-          p.key === args.key ? updated : p
-        );
-        const listHandle = await context.writeResource(
-          "networkParameters",
-          listInstance,
-          { networkName: args.networkName, parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
+          network: args.networkName,
+        });
         return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
@@ -1725,17 +1658,15 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        assertValidParameterKey(args.key);
-        const existing = await context.readResource(
-          networkParameterInstance(args.networkName, args.key),
+        context.logger.info(
+          "Deleting parameter {key} from network {network}",
+          { key: args.key, network: args.networkName },
         );
-        if (!existing) {
-          throw new Error(
-            `Parameter '${args.key}' not found on network '${args.networkName}'`,
-          );
-        }
+
+        assertValidParameterKey(args.key);
 
         const listInstance = networkParametersListInstance(
           args.networkName,
@@ -1754,6 +1685,10 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info(
+          "Deleted parameter {key} from network {network}",
+          { key: args.key, network: args.networkName },
+        );
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
@@ -1761,9 +1696,9 @@ export const model = {
     // -----------------------------------------------------------------
     // Project-level configuration parameters (key/value)
     // -----------------------------------------------------------------
-    createProjectParameter: {
+    setProjectParameter: {
       description:
-        "Create a project-level configuration parameter, validated against the active compose-spec schema",
+        "Create or update a project-level configuration parameter (upsert), validated against the active compose-spec schema",
       arguments: z.object({
         key: z.string().min(1).describe("Parameter key"),
         value: ParameterValueSchema.describe(
@@ -1776,94 +1711,33 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        const existing = await context.readResource(
-          projectParameterInstance(args.key),
-        );
-        if (existing) {
-          throw new Error(`Parameter '${args.key}' already exists`);
-        }
-
-        const activeSchema = await getActiveComposeSchema(context);
-        validateField(activeSchema, null, args.key, args.value);
-
-        const timestamp = nowIso();
-        const parameter: ProjectParameter = {
+        context.logger.info("Setting project parameter {key}", {
           key: args.key,
-          value: args.value,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        const paramHandle = await context.writeResource(
-          "parameter",
-          projectParameterInstance(args.key),
-          parameter,
-        );
-
-        const list = (await context.readResource(
-          PROJECT_PARAMETERS_LIST_INSTANCE,
-        )) as
-          | { parameters: ProjectParameter[] }
-          | null;
-        const parameters = [...(list?.parameters ?? []), parameter];
-        const listHandle = await context.writeResource(
-          "parameters",
-          PROJECT_PARAMETERS_LIST_INSTANCE,
-          { parameters },
-        );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
-
-        return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
-      },
-    },
-
-    updateProjectParameter: {
-      description:
-        "Update a project-level configuration parameter's value, validated against the active compose-spec schema",
-      arguments: z.object({
-        key: z.string().describe("Parameter key"),
-        value: ParameterValueSchema.describe(
-          "New parameter value (string, number, boolean, null, JSON object, or JSON array)",
-        ),
-      }),
-      execute: async (
-        args: { key: string; value: ParameterValue },
-        context: {
-          writeResource: WriteResource;
-          readResource: ReadResource;
-          extensionFile: (path: string) => string;
-        },
-      ) => {
-        const existing = await context.readResource(
-          projectParameterInstance(args.key),
-        ) as ProjectParameter | null;
-        if (!existing) {
-          throw new Error(`Parameter '${args.key}' not found`);
-        }
+        });
 
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, null, args.key, args.value);
 
-        const updated: ProjectParameter = {
-          ...existing,
-          value: args.value,
-          updatedAt: nowIso(),
-        };
-        const paramHandle = await context.writeResource(
-          "parameter",
-          projectParameterInstance(args.key),
-          updated,
-        );
+        const { handle: paramHandle, parameter } =
+          await writeProjectParameterRecord(
+            context,
+            args.key,
+            args.value,
+            nowIso(),
+          );
 
         const list = (await context.readResource(
           PROJECT_PARAMETERS_LIST_INSTANCE,
         )) as
           | { parameters: ProjectParameter[] }
           | null;
-        const parameters = (list?.parameters ?? []).map((p) =>
-          p.key === args.key ? updated : p
+        const parameters = mergeByKey(
+          list?.parameters ?? [],
+          [parameter],
+          (p) => p.key,
         );
         const listHandle = await context.writeResource(
           "parameters",
@@ -1873,6 +1747,7 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Set project parameter {key}", { key: args.key });
         return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
       },
     },
@@ -1886,14 +1761,12 @@ export const model = {
           writeResource: WriteResource;
           readResource: ReadResource;
           extensionFile: (path: string) => string;
+          logger: Logger;
         },
       ) => {
-        const existing = await context.readResource(
-          projectParameterInstance(args.key),
-        );
-        if (!existing) {
-          throw new Error(`Parameter '${args.key}' not found`);
-        }
+        context.logger.info("Deleting project parameter {key}", {
+          key: args.key,
+        });
 
         const list = (await context.readResource(
           PROJECT_PARAMETERS_LIST_INSTANCE,
@@ -1911,6 +1784,9 @@ export const model = {
 
         const composeFileHandle = await renderAndWriteComposeFile(context);
 
+        context.logger.info("Deleted project parameter {key}", {
+          key: args.key,
+        });
         return { dataHandles: [handle, composeFileHandle] };
       },
     },
