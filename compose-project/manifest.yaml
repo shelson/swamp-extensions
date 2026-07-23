@@ -1,0 +1,31 @@
+manifestVersion: 1
+name: "@shelson/compose-project"
+version: "2026.07.23.6"
+description: >
+  Tracks a Docker Compose project's structure (services, volumes, networks)
+  and flexible key/value configuration as swamp-managed data. Data-only —
+  pair it with @keeb/docker/compose for actual lifecycle execution. Every
+  parameter, service field, and volume/network option is validated against
+  the official compose-spec JSON Schema before it's written, so typos and
+  malformed values are rejected at write time rather than surfacing later as
+  a broken `docker compose` run. Ships with a bundled schema snapshot so it
+  works fully offline out of the box; run the updateSchema method on an
+  instance to refresh it from the canonical compose-spec repository when you
+  need a newer field.
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - compose_project.ts
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+  - extensions/models/schema/compose-spec.default.json
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - docker
+  - compose
+  - containers
+  - validation

@@ -23,3 +23,7 @@
 # Session scratch files
 next-prompt.md
 **/TODO.md
+
+# Tmp until i get them working better
+.github/
+scripts/
