@@ -20,9 +20,9 @@
  * box; run the `updateSchema` method on an instance to refresh it from the
  * canonical repository when you need a field the bundled snapshot doesn't
  * know about yet. Vendor extension fields (the compose-spec `x-` prefix)
- * and any field the active schema doesn't recognize are always passed
- * through unvalidated — a stale schema should never silently corrupt data,
- * only decline to check it.
+ * are always passed through unvalidated; any other field the active schema
+ * doesn't recognize — including one that's newer than the bundled/cached
+ * snapshot — is rejected at write time until `updateSchema` is run.
  *
  * This model is data-only: it does not run `docker compose` itself. Pair it
  * with `@keeb/docker/compose` for actual lifecycle execution once a
@@ -262,109 +262,120 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-// Write a single parameter record, preserving createdAt across repeat
-// writes to the same key. Shared by the setXParameter methods (single-key
-// upsert) and importFromFile (bulk upsert) so the "what does it mean to set
-// one parameter" logic exists in exactly one place. List-level merging is
-// deliberately left to each call site, since a single `set*` call and a
-// bulk import legitimately want different list-write shapes (one merged
-// write per key vs. one merged write per whole import).
-async function writeServiceParameterRecord(
-  context: { readResource: ReadResource; writeResource: WriteResource },
+// Build a single parameter record, preserving createdAt across repeat
+// writes to the same key — read-only, does not write anything. Shared by
+// the setXParameter methods (single-key upsert) and importFromFile (bulk
+// upsert) so the "what does it mean to set one parameter" logic exists in
+// exactly one place. Split from writing on purpose: every call site must
+// validate the resulting compose document (via buildComposeDocument) before
+// committing any write, so building the record and writing it can never be
+// one inseparable step — see the "validate before writing" note on
+// buildComposeDocument below.
+async function buildServiceParameterRecord(
+  context: { readResource: ReadResource },
   serviceName: string,
   key: string,
   value: ParameterValue,
   timestamp: string,
-): Promise<{ handle: { name: string }; parameter: ServiceParameter }> {
+): Promise<ServiceParameter> {
   const existing = await context.readResource(
     serviceParameterInstance(serviceName, key),
   ) as ServiceParameter | null;
-  const parameter: ServiceParameter = {
+  return {
     serviceName,
     key,
     value,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
-  const handle = await context.writeResource(
-    "serviceParameter",
-    serviceParameterInstance(serviceName, key),
-    parameter,
-  );
-  return { handle, parameter };
 }
 
-async function writeVolumeParameterRecord(
-  context: { readResource: ReadResource; writeResource: WriteResource },
+async function buildVolumeParameterRecord(
+  context: { readResource: ReadResource },
   volumeName: string,
   key: string,
   value: ParameterValue,
   timestamp: string,
-): Promise<{ handle: { name: string }; parameter: VolumeParameter }> {
+): Promise<VolumeParameter> {
   const existing = await context.readResource(
     volumeParameterInstance(volumeName, key),
   ) as VolumeParameter | null;
-  const parameter: VolumeParameter = {
+  return {
     volumeName,
     key,
     value,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
-  const handle = await context.writeResource(
-    "volumeParameter",
-    volumeParameterInstance(volumeName, key),
-    parameter,
-  );
-  return { handle, parameter };
 }
 
-async function writeNetworkParameterRecord(
-  context: { readResource: ReadResource; writeResource: WriteResource },
+async function buildNetworkParameterRecord(
+  context: { readResource: ReadResource },
   networkName: string,
   key: string,
   value: ParameterValue,
   timestamp: string,
-): Promise<{ handle: { name: string }; parameter: NetworkParameter }> {
+): Promise<NetworkParameter> {
   const existing = await context.readResource(
     networkParameterInstance(networkName, key),
   ) as NetworkParameter | null;
-  const parameter: NetworkParameter = {
+  return {
     networkName,
     key,
     value,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
-  const handle = await context.writeResource(
-    "networkParameter",
-    networkParameterInstance(networkName, key),
-    parameter,
-  );
-  return { handle, parameter };
 }
 
-async function writeProjectParameterRecord(
-  context: { readResource: ReadResource; writeResource: WriteResource },
+async function buildProjectParameterRecord(
+  context: { readResource: ReadResource },
   key: string,
   value: ParameterValue,
   timestamp: string,
-): Promise<{ handle: { name: string }; parameter: ProjectParameter }> {
+): Promise<ProjectParameter> {
   const existing = await context.readResource(
     projectParameterInstance(key),
   ) as ProjectParameter | null;
-  const parameter: ProjectParameter = {
+  return {
     key,
     value,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
-  const handle = await context.writeResource(
-    "parameter",
-    projectParameterInstance(key),
-    parameter,
-  );
-  return { handle, parameter };
+}
+
+// buildComposeDocument only ever reads the *list*-shaped instances below
+// (never the singular service/volume/network/parameter records), so a
+// caller that's about to change one of those lists can validate the
+// resulting document *before* writing anything, by lending this map an
+// in-memory value that wins over whatever is currently in storage for that
+// one instance. Every other instance still reads through to real storage
+// unchanged.
+function withPendingOverrides(
+  readResource: ReadResource,
+  pending: ReadonlyMap<string, Record<string, unknown>>,
+): ReadResource {
+  return async (instanceName: string) => {
+    const override = pending.get(instanceName);
+    if (override) return override;
+    return await readResource(instanceName);
+  };
+}
+
+// Convenience for the common case of a single pending list-instance change —
+// the multi-instance case (importFromFile, which can touch every list at
+// once) builds its own Map and calls withPendingOverrides directly.
+function withPending<
+  T extends { readResource: ReadResource },
+>(context: T, instanceName: string, value: Record<string, unknown>): T {
+  return {
+    ...context,
+    readResource: withPendingOverrides(
+      context.readResource,
+      new Map([[instanceName, value]]),
+    ),
+  };
 }
 
 /**
@@ -395,23 +406,26 @@ async function getActiveComposeSchema(
 /**
  * Reassemble this project's current services (with their per-service
  * parameters), volumes, networks (each with their per-entity parameters),
- * and project-level parameters into a compose document, validate it
- * against the active compose-spec schema, and store the serialized YAML as
- * the `composeFile` resource.
+ * and project-level parameters into a compose document and validate it
+ * against the active compose-spec schema. Read-only — does not write
+ * `composeFile` or anything else.
  *
- * Called at the end of every method that mutates project structure
- * (`importFromFile` and the create/update/delete methods below), so
- * `composeFile` is always current for any other code reading this model's
- * data — callers should never need to invoke `renderComposeFile` manually
- * as a separate step.
+ * Every mutating method below must call this — with `pending` carrying the
+ * in-memory value of whatever list instance that method is about to change
+ * (see `withPendingOverrides`) — and let it throw *before* performing any of
+ * its own writes. Validating only after the primary write has already
+ * committed would mean a rejected change (e.g. because an unrelated,
+ * previously-stored field is no longer valid under a schema refreshed by
+ * `updateSchema` since it was written) still leaves that primary write in
+ * place while the method reports failure — exactly the partial-write
+ * inconsistency this model's own validation is meant to prevent.
  */
-async function renderAndWriteComposeFile(
+async function buildComposeDocument(
   context: {
-    writeResource: WriteResource;
     readResource: ReadResource;
     extensionFile: (path: string) => string;
   },
-): Promise<{ name: string }> {
+): Promise<Record<string, unknown>> {
   const servicesList = (await context.readResource(
     SERVICES_LIST_INSTANCE,
   )) as { services: EntityRef[] } | null;
@@ -481,6 +495,14 @@ async function renderAndWriteComposeFile(
     throw err;
   }
 
+  return compose;
+}
+
+/** Serialize an already-validated compose document and store it as the `composeFile` resource. */
+async function writeComposeFile(
+  context: { writeResource: WriteResource },
+  compose: Record<string, unknown>,
+): Promise<{ name: string }> {
   const composeFile: ComposeFile = {
     yaml: stringifyYaml(compose, { sortKeys: false }),
     generatedAt: nowIso(),
@@ -490,6 +512,23 @@ async function renderAndWriteComposeFile(
     COMPOSE_FILE_INSTANCE,
     composeFile,
   );
+}
+
+/**
+ * Force a fresh validate-and-render of composeFile from whatever is
+ * currently in storage, with no pending change of its own — used only by
+ * the standalone `renderComposeFile` method, which by definition has no
+ * primary write of its own to sequence around.
+ */
+async function renderAndWriteComposeFile(
+  context: {
+    writeResource: WriteResource;
+    readResource: ReadResource;
+    extensionFile: (path: string) => string;
+  },
+): Promise<{ name: string }> {
+  const compose = await buildComposeDocument(context);
+  return await writeComposeFile(context, compose);
 }
 
 /** Docker Compose project model definition — structure and configuration only. */
@@ -803,13 +842,21 @@ export const model = {
         }
 
         const timestamp = nowIso();
-        const handles: { name: string }[] = [];
 
-        // ---- services + per-service parameters ----
+        // ---- Phase 1: compute every entity/parameter this import would
+        // produce, and the list-instance values that would result — no
+        // writes yet. Everything below only reads.
+
         const existingServicesList = (await context.readResource(
           SERVICES_LIST_INSTANCE,
         )) as { services: EntityRef[] } | null;
         const importedServices: EntityRef[] = [];
+        const serviceWrites: {
+          name: string;
+          entity: EntityRef;
+          imported: ServiceParameter[];
+          listValue: { serviceName: string; parameters: ServiceParameter[] };
+        }[] = [];
 
         const servicesBlock = asRecord(compose.services);
         for (
@@ -825,13 +872,6 @@ export const model = {
             createdAt: existingService?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
-          handles.push(
-            await context.writeResource(
-              "service",
-              serviceInstance(serviceName),
-              service,
-            ),
-          );
           importedServices.push(service);
 
           const existingServiceParamsList = (await context.readResource(
@@ -847,15 +887,15 @@ export const model = {
               );
               continue;
             }
-            const { handle, parameter } = await writeServiceParameterRecord(
-              context,
-              serviceName,
-              key,
-              value as ParameterValue,
-              timestamp,
+            importedServiceParams.push(
+              await buildServiceParameterRecord(
+                context,
+                serviceName,
+                key,
+                value as ParameterValue,
+                timestamp,
+              ),
             );
-            handles.push(handle);
-            importedServiceParams.push(parameter);
           }
 
           const mergedServiceParams = mergeByKey(
@@ -863,13 +903,12 @@ export const model = {
             importedServiceParams,
             (p) => p.key,
           );
-          handles.push(
-            await context.writeResource(
-              "serviceParameters",
-              serviceParametersListInstance(serviceName),
-              { serviceName, parameters: mergedServiceParams },
-            ),
-          );
+          serviceWrites.push({
+            name: serviceName,
+            entity: service,
+            imported: importedServiceParams,
+            listValue: { serviceName, parameters: mergedServiceParams },
+          });
         }
 
         const mergedServices = mergeByKey(
@@ -877,17 +916,17 @@ export const model = {
           importedServices,
           (s) => s.name,
         );
-        handles.push(
-          await context.writeResource("services", SERVICES_LIST_INSTANCE, {
-            services: mergedServices,
-          }),
-        );
 
-        // ---- volumes + per-volume parameters ----
         const existingVolumesList = (await context.readResource(
           VOLUMES_LIST_INSTANCE,
         )) as { items: EntityRef[] } | null;
         const importedVolumes: EntityRef[] = [];
+        const volumeWrites: {
+          name: string;
+          entity: EntityRef;
+          imported: VolumeParameter[];
+          listValue: { volumeName: string; parameters: VolumeParameter[] };
+        }[] = [];
 
         for (
           const [volumeName, optionsRaw] of Object.entries(
@@ -904,13 +943,6 @@ export const model = {
             createdAt: existingVolume?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
-          handles.push(
-            await context.writeResource(
-              "volume",
-              volumeInstance(volumeName),
-              volume,
-            ),
-          );
           importedVolumes.push(volume);
 
           const existingVolumeParamsList = (await context.readResource(
@@ -926,15 +958,15 @@ export const model = {
               );
               continue;
             }
-            const { handle, parameter } = await writeVolumeParameterRecord(
-              context,
-              volumeName,
-              key,
-              value as ParameterValue,
-              timestamp,
+            importedVolumeParams.push(
+              await buildVolumeParameterRecord(
+                context,
+                volumeName,
+                key,
+                value as ParameterValue,
+                timestamp,
+              ),
             );
-            handles.push(handle);
-            importedVolumeParams.push(parameter);
           }
 
           const mergedVolumeParams = mergeByKey(
@@ -942,13 +974,12 @@ export const model = {
             importedVolumeParams,
             (p) => p.key,
           );
-          handles.push(
-            await context.writeResource(
-              "volumeParameters",
-              volumeParametersListInstance(volumeName),
-              { volumeName, parameters: mergedVolumeParams },
-            ),
-          );
+          volumeWrites.push({
+            name: volumeName,
+            entity: volume,
+            imported: importedVolumeParams,
+            listValue: { volumeName, parameters: mergedVolumeParams },
+          });
         }
 
         const mergedVolumes = mergeByKey(
@@ -956,17 +987,17 @@ export const model = {
           importedVolumes,
           (v) => v.name,
         );
-        handles.push(
-          await context.writeResource("volumes", VOLUMES_LIST_INSTANCE, {
-            items: mergedVolumes,
-          }),
-        );
 
-        // ---- networks + per-network parameters ----
         const existingNetworksList = (await context.readResource(
           NETWORKS_LIST_INSTANCE,
         )) as { items: EntityRef[] } | null;
         const importedNetworks: EntityRef[] = [];
+        const networkWrites: {
+          name: string;
+          entity: EntityRef;
+          imported: NetworkParameter[];
+          listValue: { networkName: string; parameters: NetworkParameter[] };
+        }[] = [];
 
         for (
           const [networkName, optionsRaw] of Object.entries(
@@ -983,13 +1014,6 @@ export const model = {
             createdAt: existingNetwork?.createdAt ?? timestamp,
             updatedAt: timestamp,
           };
-          handles.push(
-            await context.writeResource(
-              "network",
-              networkInstance(networkName),
-              network,
-            ),
-          );
           importedNetworks.push(network);
 
           const existingNetworkParamsList = (await context.readResource(
@@ -1005,15 +1029,15 @@ export const model = {
               );
               continue;
             }
-            const { handle, parameter } = await writeNetworkParameterRecord(
-              context,
-              networkName,
-              key,
-              value as ParameterValue,
-              timestamp,
+            importedNetworkParams.push(
+              await buildNetworkParameterRecord(
+                context,
+                networkName,
+                key,
+                value as ParameterValue,
+                timestamp,
+              ),
             );
-            handles.push(handle);
-            importedNetworkParams.push(parameter);
           }
 
           const mergedNetworkParams = mergeByKey(
@@ -1021,24 +1045,18 @@ export const model = {
             importedNetworkParams,
             (p) => p.key,
           );
-          handles.push(
-            await context.writeResource(
-              "networkParameters",
-              networkParametersListInstance(networkName),
-              { networkName, parameters: mergedNetworkParams },
-            ),
-          );
+          networkWrites.push({
+            name: networkName,
+            entity: network,
+            imported: importedNetworkParams,
+            listValue: { networkName, parameters: mergedNetworkParams },
+          });
         }
 
         const mergedNetworks = mergeByKey(
           existingNetworksList?.items ?? [],
           importedNetworks,
           (n) => n.name,
-        );
-        handles.push(
-          await context.writeResource("networks", NETWORKS_LIST_INSTANCE, {
-            items: mergedNetworks,
-          }),
         );
 
         // ---- everything else at the top level becomes a project parameter
@@ -1052,14 +1070,14 @@ export const model = {
 
         for (const [key, value] of Object.entries(compose)) {
           if (structuralKeys.has(key)) continue;
-          const { handle, parameter } = await writeProjectParameterRecord(
-            context,
-            key,
-            value as ParameterValue,
-            timestamp,
+          importedParameters.push(
+            await buildProjectParameterRecord(
+              context,
+              key,
+              value as ParameterValue,
+              timestamp,
+            ),
           );
-          handles.push(handle);
-          importedParameters.push(parameter);
         }
 
         const mergedParameters = mergeByKey(
@@ -1067,6 +1085,135 @@ export const model = {
           importedParameters,
           (p) => p.key,
         );
+
+        // ---- Phase 2: validate the document this import would produce,
+        // in one pass across every list this import touches, before any of
+        // phase 1's computed values are actually written.
+        const pending = new Map<string, Record<string, unknown>>([
+          [SERVICES_LIST_INSTANCE, { services: mergedServices }],
+          [VOLUMES_LIST_INSTANCE, { items: mergedVolumes }],
+          [NETWORKS_LIST_INSTANCE, { items: mergedNetworks }],
+          [PROJECT_PARAMETERS_LIST_INSTANCE, { parameters: mergedParameters }],
+        ]);
+        for (const w of serviceWrites) {
+          pending.set(serviceParametersListInstance(w.name), w.listValue);
+        }
+        for (const w of volumeWrites) {
+          pending.set(volumeParametersListInstance(w.name), w.listValue);
+        }
+        for (const w of networkWrites) {
+          pending.set(networkParametersListInstance(w.name), w.listValue);
+        }
+        const renderedDocument = await buildComposeDocument({
+          ...context,
+          readResource: withPendingOverrides(context.readResource, pending),
+        });
+
+        // ---- Phase 3: commit. Validation above already passed, so none of
+        // these writes are expected to fail for schema reasons.
+        const handles: { name: string }[] = [];
+        for (const w of serviceWrites) {
+          handles.push(
+            await context.writeResource(
+              "service",
+              serviceInstance(w.name),
+              w.entity,
+            ),
+          );
+          for (const parameter of w.imported) {
+            handles.push(
+              await context.writeResource(
+                "serviceParameter",
+                serviceParameterInstance(w.name, parameter.key),
+                parameter,
+              ),
+            );
+          }
+          handles.push(
+            await context.writeResource(
+              "serviceParameters",
+              serviceParametersListInstance(w.name),
+              w.listValue,
+            ),
+          );
+        }
+        handles.push(
+          await context.writeResource("services", SERVICES_LIST_INSTANCE, {
+            services: mergedServices,
+          }),
+        );
+
+        for (const w of volumeWrites) {
+          handles.push(
+            await context.writeResource(
+              "volume",
+              volumeInstance(w.name),
+              w.entity,
+            ),
+          );
+          for (const parameter of w.imported) {
+            handles.push(
+              await context.writeResource(
+                "volumeParameter",
+                volumeParameterInstance(w.name, parameter.key),
+                parameter,
+              ),
+            );
+          }
+          handles.push(
+            await context.writeResource(
+              "volumeParameters",
+              volumeParametersListInstance(w.name),
+              w.listValue,
+            ),
+          );
+        }
+        handles.push(
+          await context.writeResource("volumes", VOLUMES_LIST_INSTANCE, {
+            items: mergedVolumes,
+          }),
+        );
+
+        for (const w of networkWrites) {
+          handles.push(
+            await context.writeResource(
+              "network",
+              networkInstance(w.name),
+              w.entity,
+            ),
+          );
+          for (const parameter of w.imported) {
+            handles.push(
+              await context.writeResource(
+                "networkParameter",
+                networkParameterInstance(w.name, parameter.key),
+                parameter,
+              ),
+            );
+          }
+          handles.push(
+            await context.writeResource(
+              "networkParameters",
+              networkParametersListInstance(w.name),
+              w.listValue,
+            ),
+          );
+        }
+        handles.push(
+          await context.writeResource("networks", NETWORKS_LIST_INSTANCE, {
+            items: mergedNetworks,
+          }),
+        );
+
+        for (const parameter of importedParameters) {
+          handles.push(
+            await context.writeResource(
+              "parameter",
+              projectParameterInstance(parameter.key),
+              parameter,
+            ),
+          );
+        }
         handles.push(
           await context.writeResource(
             "parameters",
@@ -1075,7 +1222,7 @@ export const model = {
           ),
         );
 
-        handles.push(await renderAndWriteComposeFile(context));
+        handles.push(await writeComposeFile(context, renderedDocument));
 
         context.logger.info(
           "Imported {services} service(s), {volumes} volume(s), {networks} network(s), {parameters} project parameter(s) from {file}",
@@ -1159,23 +1306,30 @@ export const model = {
           createdAt: timestamp,
           updatedAt: timestamp,
         };
-        const serviceHandle = await context.writeResource(
-          "service",
-          serviceInstance(args.name),
-          service,
-        );
 
         const list = (await context.readResource(SERVICES_LIST_INSTANCE)) as
           | { services: EntityRef[] }
           | null;
         const services = [...(list?.services ?? []), service];
+
+        // Validate the document this change would produce before writing
+        // anything — a newly linked service starts with no parameters, so
+        // no serviceParameters override is needed here.
+        const compose = await buildComposeDocument(
+          withPending(context, SERVICES_LIST_INSTANCE, { services }),
+        );
+
+        const serviceHandle = await context.writeResource(
+          "service",
+          serviceInstance(args.name),
+          service,
+        );
         const listHandle = await context.writeResource(
           "services",
           SERVICES_LIST_INSTANCE,
           { services },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Linked service {name} to project {project}", {
           name: args.name,
@@ -1206,13 +1360,17 @@ export const model = {
         const services = (list?.services ?? []).filter((s) =>
           s.name !== args.name
         );
+
+        const compose = await buildComposeDocument(
+          withPending(context, SERVICES_LIST_INSTANCE, { services }),
+        );
+
         const handle = await context.writeResource(
           "services",
           SERVICES_LIST_INSTANCE,
           { services },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Unlinked service {name} from project {project}", {
           name: args.name,
@@ -1260,14 +1418,13 @@ export const model = {
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "service", args.key, args.value);
 
-        const { handle: paramHandle, parameter } =
-          await writeServiceParameterRecord(
-            context,
-            args.serviceName,
-            args.key,
-            args.value,
-            nowIso(),
-          );
+        const parameter = await buildServiceParameterRecord(
+          context,
+          args.serviceName,
+          args.key,
+          args.value,
+          nowIso(),
+        );
 
         const listInstance = serviceParametersListInstance(args.serviceName);
         const list = (await context.readResource(listInstance)) as
@@ -1278,13 +1435,23 @@ export const model = {
           [parameter],
           (p) => p.key,
         );
+        const listValue = { serviceName: args.serviceName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
+        const paramHandle = await context.writeResource(
+          "serviceParameter",
+          serviceParameterInstance(args.serviceName, args.key),
+          parameter,
+        );
         const listHandle = await context.writeResource(
           "serviceParameters",
           listInstance,
-          { serviceName: args.serviceName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Set parameter {key} on service {service}", {
           key: args.key,
@@ -1323,13 +1490,18 @@ export const model = {
         const parameters = (list?.parameters ?? []).filter((p) =>
           p.key !== args.key
         );
+        const listValue = { serviceName: args.serviceName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
         const handle = await context.writeResource(
           "serviceParameters",
           listInstance,
-          { serviceName: args.serviceName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Deleted parameter {key} from service {service}", {
           key: args.key,
@@ -1373,23 +1545,27 @@ export const model = {
           createdAt: timestamp,
           updatedAt: timestamp,
         };
-        const volumeHandle = await context.writeResource(
-          "volume",
-          volumeInstance(args.name),
-          volume,
-        );
 
         const list = (await context.readResource(VOLUMES_LIST_INSTANCE)) as
           | { items: EntityRef[] }
           | null;
         const items = [...(list?.items ?? []), volume];
+
+        const compose = await buildComposeDocument(
+          withPending(context, VOLUMES_LIST_INSTANCE, { items }),
+        );
+
+        const volumeHandle = await context.writeResource(
+          "volume",
+          volumeInstance(args.name),
+          volume,
+        );
         const listHandle = await context.writeResource(
           "volumes",
           VOLUMES_LIST_INSTANCE,
           { items },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Created volume {name}", { name: args.name });
         return { dataHandles: [volumeHandle, listHandle, composeFileHandle] };
@@ -1414,13 +1590,17 @@ export const model = {
           | { items: EntityRef[] }
           | null;
         const items = (list?.items ?? []).filter((v) => v.name !== args.name);
+
+        const compose = await buildComposeDocument(
+          withPending(context, VOLUMES_LIST_INSTANCE, { items }),
+        );
+
         const handle = await context.writeResource(
           "volumes",
           VOLUMES_LIST_INSTANCE,
           { items },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Deleted volume {name}", { name: args.name });
         return { dataHandles: [handle, composeFileHandle] };
@@ -1462,14 +1642,13 @@ export const model = {
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "volume", args.key, args.value);
 
-        const { handle: paramHandle, parameter } =
-          await writeVolumeParameterRecord(
-            context,
-            args.volumeName,
-            args.key,
-            args.value,
-            nowIso(),
-          );
+        const parameter = await buildVolumeParameterRecord(
+          context,
+          args.volumeName,
+          args.key,
+          args.value,
+          nowIso(),
+        );
 
         const listInstance = volumeParametersListInstance(args.volumeName);
         const list = (await context.readResource(listInstance)) as
@@ -1480,13 +1659,23 @@ export const model = {
           [parameter],
           (p) => p.key,
         );
+        const listValue = { volumeName: args.volumeName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
+        const paramHandle = await context.writeResource(
+          "volumeParameter",
+          volumeParameterInstance(args.volumeName, args.key),
+          parameter,
+        );
         const listHandle = await context.writeResource(
           "volumeParameters",
           listInstance,
-          { volumeName: args.volumeName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Set parameter {key} on volume {volume}", {
           key: args.key,
@@ -1525,13 +1714,18 @@ export const model = {
         const parameters = (list?.parameters ?? []).filter((p) =>
           p.key !== args.key
         );
+        const listValue = { volumeName: args.volumeName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
         const handle = await context.writeResource(
           "volumeParameters",
           listInstance,
-          { volumeName: args.volumeName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Deleted parameter {key} from volume {volume}", {
           key: args.key,
@@ -1574,23 +1768,27 @@ export const model = {
           createdAt: timestamp,
           updatedAt: timestamp,
         };
-        const networkHandle = await context.writeResource(
-          "network",
-          networkInstance(args.name),
-          network,
-        );
 
         const list = (await context.readResource(NETWORKS_LIST_INSTANCE)) as
           | { items: EntityRef[] }
           | null;
         const items = [...(list?.items ?? []), network];
+
+        const compose = await buildComposeDocument(
+          withPending(context, NETWORKS_LIST_INSTANCE, { items }),
+        );
+
+        const networkHandle = await context.writeResource(
+          "network",
+          networkInstance(args.name),
+          network,
+        );
         const listHandle = await context.writeResource(
           "networks",
           NETWORKS_LIST_INSTANCE,
           { items },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Created network {name}", { name: args.name });
         return {
@@ -1617,13 +1815,17 @@ export const model = {
           | { items: EntityRef[] }
           | null;
         const items = (list?.items ?? []).filter((n) => n.name !== args.name);
+
+        const compose = await buildComposeDocument(
+          withPending(context, NETWORKS_LIST_INSTANCE, { items }),
+        );
+
         const handle = await context.writeResource(
           "networks",
           NETWORKS_LIST_INSTANCE,
           { items },
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Deleted network {name}", { name: args.name });
         return { dataHandles: [handle, composeFileHandle] };
@@ -1665,14 +1867,13 @@ export const model = {
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, "network", args.key, args.value);
 
-        const { handle: paramHandle, parameter } =
-          await writeNetworkParameterRecord(
-            context,
-            args.networkName,
-            args.key,
-            args.value,
-            nowIso(),
-          );
+        const parameter = await buildNetworkParameterRecord(
+          context,
+          args.networkName,
+          args.key,
+          args.value,
+          nowIso(),
+        );
 
         const listInstance = networkParametersListInstance(
           args.networkName,
@@ -1685,13 +1886,23 @@ export const model = {
           [parameter],
           (p) => p.key,
         );
+        const listValue = { networkName: args.networkName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
+        const paramHandle = await context.writeResource(
+          "networkParameter",
+          networkParameterInstance(args.networkName, args.key),
+          parameter,
+        );
         const listHandle = await context.writeResource(
           "networkParameters",
           listInstance,
-          { networkName: args.networkName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Set parameter {key} on network {network}", {
           key: args.key,
@@ -1732,13 +1943,18 @@ export const model = {
         const parameters = (list?.parameters ?? []).filter((p) =>
           p.key !== args.key
         );
+        const listValue = { networkName: args.networkName, parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, listInstance, listValue),
+        );
+
         const handle = await context.writeResource(
           "networkParameters",
           listInstance,
-          { networkName: args.networkName, parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info(
           "Deleted parameter {key} from network {network}",
@@ -1776,13 +1992,12 @@ export const model = {
         const activeSchema = await getActiveComposeSchema(context);
         validateField(activeSchema, null, args.key, args.value);
 
-        const { handle: paramHandle, parameter } =
-          await writeProjectParameterRecord(
-            context,
-            args.key,
-            args.value,
-            nowIso(),
-          );
+        const parameter = await buildProjectParameterRecord(
+          context,
+          args.key,
+          args.value,
+          nowIso(),
+        );
 
         const list = (await context.readResource(
           PROJECT_PARAMETERS_LIST_INSTANCE,
@@ -1794,13 +2009,23 @@ export const model = {
           [parameter],
           (p) => p.key,
         );
+        const listValue = { parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, PROJECT_PARAMETERS_LIST_INSTANCE, listValue),
+        );
+
+        const paramHandle = await context.writeResource(
+          "parameter",
+          projectParameterInstance(args.key),
+          parameter,
+        );
         const listHandle = await context.writeResource(
           "parameters",
           PROJECT_PARAMETERS_LIST_INSTANCE,
-          { parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Set project parameter {key}", { key: args.key });
         return { dataHandles: [paramHandle, listHandle, composeFileHandle] };
@@ -1831,13 +2056,18 @@ export const model = {
         const parameters = (list?.parameters ?? []).filter((p) =>
           p.key !== args.key
         );
+        const listValue = { parameters };
+
+        const compose = await buildComposeDocument(
+          withPending(context, PROJECT_PARAMETERS_LIST_INSTANCE, listValue),
+        );
+
         const handle = await context.writeResource(
           "parameters",
           PROJECT_PARAMETERS_LIST_INSTANCE,
-          { parameters },
+          listValue,
         );
-
-        const composeFileHandle = await renderAndWriteComposeFile(context);
+        const composeFileHandle = await writeComposeFile(context, compose);
 
         context.logger.info("Deleted project parameter {key}", {
           key: args.key,

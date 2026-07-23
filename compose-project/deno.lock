@@ -10,6 +10,7 @@
     "jsr:@systeminit/swamp-testing@0.20260604.20": "0.20260604.20",
     "npm:@marcbachmann/cel-js@7.6.1": "7.6.1",
     "npm:ajv@8.17.1": "8.17.1",
+    "npm:ajv@8.18.0": "8.18.0",
     "npm:zod@4": "4.4.3",
     "npm:zod@^4.3.6": "4.4.3"
   },
@@ -48,6 +49,15 @@
     },
     "ajv@8.17.1": {
       "integrity": "sha512-B/gBuNg5SiMTrPkC+A2+cW0RszwxYmn6VYxB/inlBStS5nx6xHIt/ehKRhIMhqusl7a8LjQoZnjCs5vhwxOQ1g==",
+      "dependencies": [
+        "fast-deep-equal",
+        "fast-uri",
+        "json-schema-traverse",
+        "require-from-string"
+      ]
+    },
+    "ajv@8.18.0": {
+      "integrity": "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A==",
       "dependencies": [
         "fast-deep-equal",
         "fast-uri",

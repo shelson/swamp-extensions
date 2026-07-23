@@ -38,14 +38,38 @@ function modelTestContext(
 // image/ports/restart, volume driver/external, network driver, project
 // version) to exercise validateField/validateDocument without depending on
 // the real bundled compose-spec.json or network access.
+// Mirrors the real compose-spec.default.json's structure closely enough to
+// exercise whole-document validation faithfully: each of services/volumes/
+// networks routes its entries through patternProperties into the matching
+// $defs entry (with additionalProperties: false), the same shape the real
+// schema uses, rather than a bare `{"type": "object"}` that would let
+// invalid nested fields through validateDocument unnoticed.
 const SCHEMA_FIXTURE = {
   "$id": "compose-spec-test",
   "type": "object",
   "properties": {
     "version": { "type": "string" },
-    "services": { "type": "object" },
-    "volumes": { "type": "object" },
-    "networks": { "type": "object" },
+    "services": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9._-]+$": { "$ref": "#/$defs/service" },
+      },
+      "additionalProperties": false,
+    },
+    "volumes": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9._-]+$": { "$ref": "#/$defs/volume" },
+      },
+      "additionalProperties": false,
+    },
+    "networks": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9._-]+$": { "$ref": "#/$defs/network" },
+      },
+      "additionalProperties": false,
+    },
   },
   "$defs": {
     "service": {
@@ -55,6 +79,8 @@ const SCHEMA_FIXTURE = {
         "ports": { "type": "array", "items": { "type": "string" } },
         "restart": { "type": "string" },
       },
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
     },
     "volume": {
       "type": "object",
@@ -62,12 +88,16 @@ const SCHEMA_FIXTURE = {
         "driver": { "type": "string" },
         "external": { "type": "boolean" },
       },
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
     },
     "network": {
       "type": "object",
       "properties": {
         "driver": { "type": "string" },
       },
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
     },
   },
 };
@@ -226,6 +256,65 @@ Deno.test("setServiceParameter: rejects the reserved parameter-list key", async 
       context,
     )
   );
+});
+
+Deno.test("setServiceParameter: rejects a field the active schema doesn't recognize", async () => {
+  const { context } = modelTestContext({
+    globalArgs: GLOBAL_ARGS,
+    storedResources: { ...schemaResource(), ...withService("web") },
+  });
+
+  // "environment" isn't one of the fields SCHEMA_FIXTURE's service def
+  // declares — an unrecognized field is rejected outright (it is not
+  // passed through), so a field newer than the active schema snapshot
+  // requires updateSchema before it can be set.
+  await assertRejects(() =>
+    model.methods.setServiceParameter.execute(
+      { serviceName: "web", key: "environment", value: { FOO: "bar" } },
+      context,
+    )
+  );
+});
+
+Deno.test("setServiceParameter: validates the whole document before writing, so a stale unrelated field blocks the write instead of partially applying it", async () => {
+  const { context, getWrittenResources } = modelTestContext({
+    globalArgs: GLOBAL_ARGS,
+    storedResources: {
+      ...schemaResource(),
+      ...withService("web"),
+      // buildComposeDocument only looks at a service's parameters if that
+      // service appears in the top-level "services" list resource.
+      "services": { services: [{ name: "web", ...withService("web")["service-web"] }] },
+      // Simulates a value that's stale relative to the active schema —
+      // e.g. it satisfied an earlier compose-spec revision's type for
+      // "ports" before updateSchema refreshed the cache to the current
+      // one, which (per SCHEMA_FIXTURE) requires an array.
+      "service-web::__params__": {
+        serviceName: "web",
+        parameters: [{
+          serviceName: "web",
+          key: "ports",
+          value: "8080:80",
+          createdAt: "2019-01-01T00:00:00.000Z",
+          updatedAt: "2019-01-01T00:00:00.000Z",
+        }],
+      },
+    },
+  });
+
+  // Setting a perfectly valid, unrelated field still fails, because
+  // re-rendering the whole document surfaces the stale "ports" value.
+  await assertRejects(() =>
+    model.methods.setServiceParameter.execute(
+      { serviceName: "web", key: "restart", value: "always" },
+      context,
+    )
+  );
+
+  // Critically, that failure must happen *before* any write — "restart"
+  // must not end up persisted just because the final render step is what
+  // rejected the overall call.
+  assertEquals(getWrittenResources().length, 0);
 });
 
 // ---------------------------------------------------------------------------

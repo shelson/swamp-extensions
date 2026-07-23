@@ -2,16 +2,17 @@
  * Validates project/service/volume/network fields against a compose-spec
  * JSON Schema document (https://github.com/compose-spec/compose-go).
  *
- * A field is validated only if the schema explicitly defines it — vendor
- * extension keys (the compose-spec `x-` prefix) and any field the *active*
- * schema doesn't yet know about are passed through untouched. That keeps a
- * stale bundled/cached schema from blocking legitimate newer compose fields
- * outright; it just means the caller should run `updateSchema` and retry.
+ * A field is validated only if the schema explicitly defines it. Vendor
+ * extension keys (the compose-spec `x-` prefix) are always passed through
+ * untouched. Any other field the *active* schema doesn't recognize is
+ * rejected — including one that's newer than the bundled/cached snapshot;
+ * run `updateSchema` and retry to pick up fields the canonical compose-spec
+ * has added since the snapshot was taken.
  *
  * @module
  */
-import { Ajv2020 } from "npm:ajv@8.17.1/dist/2020.js";
-import type { ErrorObject } from "npm:ajv@8.17.1";
+import { Ajv2020 } from "npm:ajv@8.18.0/dist/2020.js";
+import type { ErrorObject } from "npm:ajv@8.18.0";
 
 export class ComposeSchemaValidationError extends Error {
   constructor(message: string) {
@@ -57,8 +58,9 @@ function lookupPropertySchema(
  * Validate a single field's value against the schema definition for
  * `defName` (or the document root when `defName` is null, for top-level
  * project fields). Throws {@link ComposeSchemaValidationError} when the
- * schema defines the field and the value doesn't match it. Unknown fields
- * (including `x-*` vendor extensions) are silently allowed.
+ * schema defines the field and the value doesn't match it, or when the
+ * field isn't recognized by the schema at all. `x-*` vendor extensions are
+ * the sole exception — those are always silently allowed.
  */
 export function validateField(
   schemaDoc: Record<string, unknown>,

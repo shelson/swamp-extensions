@@ -23,10 +23,11 @@ field) is rejected at write time instead of surfacing later as a broken
   snapshot doesn't know about yet. The refreshed copy is versioned instance
   data (`swamp data versions <instance> active`), so you can inspect or roll
   back to a previous schema version at any time.
-- Vendor extension fields (the compose-spec `x-` prefix) and any field the
-  active schema doesn't yet recognize are always passed through unvalidated —
-  a stale or incomplete schema should never silently corrupt data, only
-  decline to check it.
+- Vendor extension fields (the compose-spec `x-` prefix) are always passed
+  through unvalidated. Any other field the active schema doesn't recognize —
+  including one that's newer than the bundled/cached snapshot — is rejected
+  at write time; run `updateSchema` and retry to pick up fields the canonical
+  compose-spec has added since the snapshot was taken.
 
 A rendered `compose.yaml` is always kept current as the `composeFile` data
 attribute: every method that changes project structure (`importFromFile` and
