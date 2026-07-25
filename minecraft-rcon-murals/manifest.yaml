@@ -1,0 +1,24 @@
+manifestVersion: 1
+name: "@shelson/minecraft-rcon-murals"
+version: "2026.07.26.1"
+description: >
+  Decodes a JPG into a to-do list of Minecraft concrete blocks sized to fit a
+  start/end corner bounding box, then places them into a running server over
+  RCON in small batches so a scheduled workflow can build the mural slowly,
+  one `/setblock` at a time, without hammering the server.
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - pixel_mural.ts
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+  - darwin-x86_64
+  - darwin-aarch64
+labels:
+  - minecraft
+  - rcon
+  - pixel-art
+  - automation
