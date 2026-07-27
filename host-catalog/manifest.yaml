@@ -1,0 +1,18 @@
+manifestVersion: 1
+name: "@shelson/catalog"
+version: "2026.07.27.1"
+description: >-
+  A catalogue of hosts and groups with hierarchical global/group/host
+  metadata, resolved per host for use in workflows.
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - catalog.ts
+skills:
+  - host-catalog
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - inventory
+  - cmdb
+  - homelab
