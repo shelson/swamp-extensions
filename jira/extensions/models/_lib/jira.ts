@@ -96,6 +96,25 @@ async function resolveCredentials(
   return { site, email, apiToken };
 }
 
+/**
+ * Pre-flight check body: validates that a Jira site, email, and API token
+ * resolve and authenticate (via `resolveCredentials`) before a mutating
+ * method proceeds. Intended for use in a model's `checks` block.
+ */
+export async function checkCredentials(
+  credentials?: JiraCredentials,
+): Promise<{ pass: boolean; errors?: string[] }> {
+  try {
+    await resolveCredentials(credentials);
+    return { pass: true };
+  } catch (err) {
+    return {
+      pass: false,
+      errors: [err instanceof Error ? err.message : String(err)],
+    };
+  }
+}
+
 function authHeaders(
   email: string,
   apiToken: string,
@@ -134,6 +153,62 @@ async function request(
   }
 
   return resp;
+}
+
+/**
+ * Creates a resource; on a name/key conflict (409, or 400 with an
+ * "already exists" error), adopts the existing resource with the same
+ * `name` (or `key`) from the list endpoint instead of failing.
+ * Response-body objects are matched against `values`/`total` paging envelopes
+ * and bare arrays.
+ */
+export async function createOrAdopt(
+  endpoint: string,
+  body: Record<string, unknown>,
+  listEndpoint: string,
+  credentials?: JiraCredentials,
+): Promise<Record<string, unknown>> {
+  const creds = await resolveCredentials(credentials);
+  const url = `https://${creds.site}${endpoint}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: authHeaders(creds.email, creds.apiToken),
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  if (resp.ok) {
+    if (!text) return {};
+    return JSON.parse(text);
+  }
+  const looksLikeConflict = resp.status === 409 ||
+    (resp.status === 400 &&
+      /already exists|already in use|uses this (project )?key|same name|two issue link types|uses this project/i
+        .test(text));
+  if (!looksLikeConflict) {
+    throw new Error(
+      `Jira API error: POST ${endpoint} returned ${resp.status}: ${text}`,
+    );
+  }
+  const wantedName = (body.name ?? body.key ?? body.projectKey)?.toString();
+  let match: Record<string, unknown> | undefined;
+  try {
+    const candidates = await list(listEndpoint, credentials);
+    match = candidates.find(
+      (c) =>
+        (wantedName !== undefined && c.name?.toString() === wantedName) ||
+        (wantedName !== undefined && c.key?.toString() === wantedName) ||
+        (body.key !== undefined && c.key?.toString() === body.key),
+    );
+  } catch {
+    // List endpoint unavailable — adoption not possible; rethrow.
+    match = undefined;
+  }
+  if (!match) {
+    throw new Error(
+      `Jira API error: POST ${endpoint} returned ${resp.status}: ${text}`,
+    );
+  }
+  return match;
 }
 
 export async function create(
@@ -210,6 +285,66 @@ export async function update(
     return await read(endpoint, id, credentials);
   }
   return JSON.parse(text);
+}
+
+/**
+ * Transitions an issue via POST /issue/{idOrKey}/transitions. The endpoint
+ * returns no body, so the issue is re-read to return full state.
+ */
+export async function transitionIssue(
+  idOrKey: string,
+  transition: Record<string, unknown>,
+  extraFields: Record<string, unknown>,
+  credentials?: JiraCredentials,
+): Promise<Record<string, unknown>> {
+  await request(
+    "POST",
+    `/rest/api/3/issue/${idOrKey}/transitions`,
+    { ...extraFields, transition },
+    credentials,
+  );
+  return await read("/rest/api/3/issue", idOrKey, credentials);
+}
+
+/**
+ * Lists resources from a GET endpoint. Wraps common response shapes:
+ * an array, or an object with a `values`/`total` paging envelope.
+ */
+export async function list(
+  endpoint: string,
+  credentials?: JiraCredentials,
+): Promise<Array<Record<string, unknown>>> {
+  const resp = await request("GET", endpoint, undefined, credentials);
+  const data = await resp.json();
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    for (const key of Object.keys(data)) {
+      const value = (data as Record<string, unknown>)[key];
+      if (Array.isArray(value)) {
+        return value;
+      }
+    }
+  }
+  return [];
+}
+
+export async function removeWithQuery(
+  endpoint: string,
+  id: number | string,
+  query?: Record<string, string>,
+  credentials?: JiraCredentials,
+): Promise<{ existed: boolean }> {
+  const qs = query && Object.keys(query).length > 0
+    ? "?" + new URLSearchParams(query).toString()
+    : "";
+  const resp = await request(
+    "DELETE",
+    `${endpoint}/${id}${qs}`,
+    undefined,
+    credentials,
+  );
+  await resp.text();
+  return { existed: resp.status !== 404 };
 }
 
 export async function remove(

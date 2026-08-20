@@ -26,13 +26,20 @@
  * Swamp extension model for a Jira plan.
  *
  * Wraps the `/rest/api/3/plans/plan` API as a swamp model so create, get, update,
- * delete, and sync can be driven through `swamp model`.
+ * and sync can be driven through `swamp model`. Jira's Plans API has no DELETE
+ * endpoint, so this model does not expose a `delete` method.
  *
  * @module
  */
 
 import { z } from "npm:zod@4.3.6";
-import { create, read, tryRead, update } from "./_lib/jira.ts";
+import {
+  checkCredentials,
+  create,
+  read,
+  tryRead,
+  update,
+} from "./_lib/jira.ts";
 
 const GlobalArgsSchema = z.object({
   crossProjectReleases: z.array(z.object({
@@ -145,7 +152,7 @@ const ResourceSchema = z.object({
     }).optional(),
   }).optional(),
   status: z.string().optional(),
-}).passthrough();
+});
 
 type ResourceData = z.infer<typeof ResourceSchema>;
 
@@ -209,7 +216,7 @@ const InputsSchema = z.object({
 
 /** Swamp extension model for Jira plan. Registered at `/jira/plan`. */
 export const model = {
-  type: "/jira/plan",
+  type: "@shelson/jira/plan",
   version: "2026.08.21.1",
   globalArguments: GlobalArgsSchema,
   inputsSchema: InputsSchema,
@@ -221,16 +228,46 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    credentials: {
+      description:
+        "Validates the Jira site, email, and API token resolve and authenticate",
+      labels: ["live"],
+      execute: async (context: any) => {
+        const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
+        return await checkCredentials({
+          site: g.site,
+          email: g.email,
+          token: g.token,
+        });
+      },
+    },
+  },
   methods: {
     create: {
       description: "Create a plan",
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
+        if (g.scheduling === undefined || g.issueSources === undefined) {
+          throw new Error(
+            "plan.create requires 'scheduling' and 'issueSources' global " +
+              "arguments (Jira returns 400 without them, and 'estimation' " +
+              "inside scheduling is also required)",
+          );
+        }
         const body: Record<string, unknown> = {};
         if (g.crossProjectReleases !== undefined) {
           body.crossProjectReleases = g.crossProjectReleases;
@@ -254,6 +291,10 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -264,6 +305,10 @@ export const model = {
       }),
       execute: async (args: { id: string | number }, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const result = await read("/rest/api/3/plans/plan", args.id, {
           site: g.site,
           email: g.email,
@@ -276,6 +321,10 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -284,18 +333,29 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
-        const content = await context.dataRepository.getContent(
-          context.modelType,
-          context.modelId,
-          instanceName,
-        );
-        if (!content) throw new Error("No data found - run create first");
-        const existing = JSON.parse(new TextDecoder().decode(content));
+        const existing = await context.readResource(instanceName);
+        if (!existing) throw new Error("No data found - run create first");
         const body: Record<string, unknown> = {};
+        if (g.crossProjectReleases !== undefined) {
+          body.crossProjectReleases = g.crossProjectReleases;
+        }
+        if (g.customFields !== undefined) body.customFields = g.customFields;
+        if (g.exclusionRules !== undefined) {
+          body.exclusionRules = g.exclusionRules;
+        }
+        if (g.issueSources !== undefined) body.issueSources = g.issueSources;
+        if (g.leadAccountId !== undefined) body.leadAccountId = g.leadAccountId;
+        if (g.name !== undefined) body.name = g.name;
+        if (g.permissions !== undefined) body.permissions = g.permissions;
+        if (g.scheduling !== undefined) body.scheduling = g.scheduling;
         const result = await update(
           "/rest/api/3/plans/plan",
           existing.planId ?? existing.id,
@@ -308,6 +368,10 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -316,19 +380,18 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
-        const content = await context.dataRepository.getContent(
-          context.modelType,
-          context.modelId,
-          instanceName,
-        );
-        if (!content) {
+        const existing = await context.readResource(instanceName);
+        if (!existing) {
           throw new Error("No data found - run create or get first");
         }
-        const existing = JSON.parse(new TextDecoder().decode(content));
         const result = await tryRead(
           "/rest/api/3/plans/plan",
           existing.planId ?? existing.id,
@@ -340,12 +403,20 @@ export const model = {
             instanceName,
             result,
           );
+          context.logger.info("Completed {method} on {type}", {
+            method: context.methodName,
+            type: context.modelType,
+          });
           return { dataHandles: [handle] };
         }
         const handle = await context.writeResource("state", instanceName, {
           planId: existing.planId ?? existing.id,
           status: "not_found",
           syncedAt: new Date().toISOString(),
+        });
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
         });
         return { dataHandles: [handle] };
       },

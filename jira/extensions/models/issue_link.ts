@@ -32,7 +32,45 @@
  */
 
 import { z } from "npm:zod@4.3.6";
-import { create, read, remove, tryRead } from "./_lib/jira.ts";
+import {
+  checkCredentials,
+  create,
+  read,
+  remove,
+  tryRead,
+} from "./_lib/jira.ts";
+
+/** Extracts the issue key (or id) from an issue reference object. */
+function issueKeyOf(ref: unknown): string | undefined {
+  if (!ref || typeof ref !== "object") return undefined;
+  const o = ref as Record<string, unknown>;
+  return (o.key ?? o.id)?.toString();
+}
+
+/** Finds the link between two issues (optionally of a given type). */
+async function findLinkBetween(
+  issueA: string,
+  issueB: string,
+  typeName: string | undefined,
+  credentials: { site?: string; email?: string; token?: string },
+): Promise<string | undefined> {
+  const issue = await tryRead("/rest/api/3/issue", issueA, credentials);
+  const links = (issue?.fields as Record<string, unknown> | undefined)
+    ?.issuelinks;
+  if (!Array.isArray(links)) return undefined;
+  for (const link of links as Array<Record<string, unknown>>) {
+    const inward = issueKeyOf(link.inwardIssue);
+    const outward = issueKeyOf(link.outwardIssue);
+    const type = (link.type as Record<string, unknown> | undefined)?.name
+      ?.toString();
+    const touches = inward === issueB || outward === issueB;
+    const typeMatches = typeName === undefined || type === typeName;
+    if (touches && typeMatches && link.id !== undefined && link.id !== null) {
+      return link.id.toString();
+    }
+  }
+  return undefined;
+}
 
 const GlobalArgsSchema = z.object({
   name: z.string().describe(
@@ -739,7 +777,7 @@ const ResourceSchema = z.object({
     outward: z.string().optional(),
     self: z.string().optional(),
   }).optional(),
-}).passthrough();
+});
 
 type ResourceData = z.infer<typeof ResourceSchema>;
 
@@ -1124,7 +1162,7 @@ const InputsSchema = z.object({
 
 /** Swamp extension model for Jira issue link. Registered at `/jira/issue-link`. */
 export const model = {
-  type: "/jira/issue-link",
+  type: "@shelson/jira/issue-link",
   version: "2026.08.21.1",
   globalArguments: GlobalArgsSchema,
   inputsSchema: InputsSchema,
@@ -1136,12 +1174,35 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    credentials: {
+      description:
+        "Validates the Jira site, email, and API token resolve and authenticate",
+      labels: ["live"],
+      execute: async (context: any) => {
+        const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
+        return await checkCredentials({
+          site: g.site,
+          email: g.email,
+          token: g.token,
+        });
+      },
+    },
+  },
   methods: {
     create: {
       description: "Create a issue link",
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
@@ -1151,16 +1212,38 @@ export const model = {
         if (g.inwardIssue !== undefined) body.inwardIssue = g.inwardIssue;
         if (g.outwardIssue !== undefined) body.outwardIssue = g.outwardIssue;
         if (g.type !== undefined) body.type = g.type;
-        const result = await create("/rest/api/3/issueLink", body, {
-          site: g.site,
-          email: g.email,
-          token: g.token,
-        }) as ResourceData;
+        const credentials = { site: g.site, email: g.email, token: g.token };
+        const result = await create(
+          "/rest/api/3/issueLink",
+          body,
+          credentials,
+        ) as ResourceData;
+        // Jira returns 201 with an empty body on success — resolve the link id
+        // by reading back the inward issue so the resource is addressable.
+        if (result.id === undefined) {
+          const a = issueKeyOf(g.inwardIssue);
+          const b = issueKeyOf(g.outwardIssue);
+          const typeName = issueKeyOf(g.type);
+          if (a && b) {
+            const id = await findLinkBetween(a, b, typeName, credentials) ??
+              await findLinkBetween(b, a, typeName, credentials);
+            if (id !== undefined) {
+              result.id = id;
+              result.typeName = typeName;
+              result.inwardIssue = { key: a };
+              result.outwardIssue = { key: b };
+            }
+          }
+        }
         const handle = await context.writeResource(
           "state",
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -1173,6 +1256,10 @@ export const model = {
       }),
       execute: async (args: { id: string | number }, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const result = await read("/rest/api/3/issueLink", args.id, {
           site: g.site,
           email: g.email,
@@ -1187,32 +1274,62 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
     delete: {
       description: "Delete the issue link",
       arguments: z.object({
-        id: z.union([z.string(), z.number()]).describe(
-          "The ID of the issue link",
+        id: z.union([z.string(), z.number()]).optional().describe(
+          "The ID of the issue link (resolved from inwardIssue/outwardIssue when omitted)",
         ),
       }),
-      execute: async (args: { id: string | number }, context: any) => {
+      execute: async (args: { id?: string | number }, context: any) => {
         const g = context.globalArgs;
-        const { existed } = await remove("/rest/api/3/issueLink", args.id, {
-          site: g.site,
-          email: g.email,
-          token: g.token,
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
         });
-        const instanceName = (g.name?.toString() ?? args.id.toString()).replace(
-          /[\/\\]/g,
-          "_",
-        ).replace(/\.\./g, "_").replace(/\0/g, "");
+        const credentials = { site: g.site, email: g.email, token: g.token };
+        let resolvedId: string | number | undefined = args.id;
+        if (resolvedId === undefined || String(resolvedId) === "") {
+          const a = issueKeyOf(g.inwardIssue);
+          const b = issueKeyOf(g.outwardIssue);
+          const typeName = issueKeyOf(g.type);
+          if (a && b) {
+            resolvedId = await findLinkBetween(a, b, typeName, credentials) ??
+              await findLinkBetween(b, a, typeName, credentials);
+          }
+        }
+        if (resolvedId === undefined) {
+          throw new Error(
+            "Cannot delete issue link: no id provided and no link could be " +
+              "resolved from inwardIssue/outwardIssue global arguments",
+          );
+        }
+        const { existed } = await remove(
+          "/rest/api/3/issueLink",
+          resolvedId,
+          credentials,
+        );
+        const instanceName = (g.name?.toString() ?? resolvedId.toString())
+          .replace(
+            /[\/\\]/g,
+            "_",
+          ).replace(/\.\./g, "_").replace(/\0/g, "");
         const handle = await context.writeResource("state", instanceName, {
           id: args.id,
           existed,
           status: existed ? "deleted" : "not_found",
           deletedAt: new Date().toISOString(),
+        });
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
         });
         return { dataHandles: [handle] };
       },
@@ -1222,36 +1339,56 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
-        const content = await context.dataRepository.getContent(
-          context.modelType,
-          context.modelId,
-          instanceName,
-        );
-        if (!content) {
+        const existing = await context.readResource(instanceName);
+        if (!existing) {
           throw new Error("No data found - run create or get first");
         }
-        const existing = JSON.parse(new TextDecoder().decode(content));
-        const result = await tryRead(
-          "/rest/api/3/issueLink",
-          existing.id ?? existing.id,
-          { site: g.site, email: g.email, token: g.token },
-        ) as ResourceData | null;
+        const credentials = { site: g.site, email: g.email, token: g.token };
+        let linkId = existing.id?.toString();
+        if (!linkId) {
+          // Fall back to locating the link via its endpoints (e.g. data from a
+          // create run before id resolution was added).
+          const a = issueKeyOf(g.inwardIssue);
+          const b = issueKeyOf(g.outwardIssue);
+          const typeName = issueKeyOf(g.type);
+          if (a && b) {
+            linkId = await findLinkBetween(a, b, typeName, credentials) ??
+              await findLinkBetween(b, a, typeName, credentials);
+          }
+        }
+        const result = linkId
+          ? await tryRead("/rest/api/3/issueLink", linkId, credentials) as
+            | ResourceData
+            | null
+          : null;
         if (result) {
           const handle = await context.writeResource(
             "state",
             instanceName,
             result,
           );
+          context.logger.info("Completed {method} on {type}", {
+            method: context.methodName,
+            type: context.modelType,
+          });
           return { dataHandles: [handle] };
         }
         const handle = await context.writeResource("state", instanceName, {
-          id: existing.id ?? existing.id,
+          id: linkId ?? existing.id,
           status: "not_found",
           syncedAt: new Date().toISOString(),
+        });
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
         });
         return { dataHandles: [handle] };
       },

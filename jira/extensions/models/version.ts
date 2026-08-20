@@ -32,7 +32,14 @@
  */
 
 import { z } from "npm:zod@4.3.6";
-import { create, read, remove, tryRead, update } from "./_lib/jira.ts";
+import {
+  checkCredentials,
+  createOrAdopt,
+  read,
+  remove,
+  tryRead,
+  update,
+} from "./_lib/jira.ts";
 
 const GlobalArgsSchema = z.object({
   archived: z.boolean().describe(
@@ -115,7 +122,7 @@ const ResourceSchema = z.object({
   startDate: z.string().optional(),
   userReleaseDate: z.string().optional(),
   userStartDate: z.string().optional(),
-}).passthrough();
+});
 
 type ResourceData = z.infer<typeof ResourceSchema>;
 
@@ -138,7 +145,7 @@ const InputsSchema = z.object({
 
 /** Swamp extension model for Jira version. Registered at `/jira/version`. */
 export const model = {
-  type: "/jira/version",
+  type: "@shelson/jira/version",
   version: "2026.08.21.1",
   globalArguments: GlobalArgsSchema,
   inputsSchema: InputsSchema,
@@ -150,12 +157,35 @@ export const model = {
       garbageCollection: 10,
     },
   },
+  checks: {
+    credentials: {
+      description:
+        "Validates the Jira site, email, and API token resolve and authenticate",
+      labels: ["live"],
+      execute: async (context: any) => {
+        const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
+        return await checkCredentials({
+          site: g.site,
+          email: g.email,
+          token: g.token,
+        });
+      },
+    },
+  },
   methods: {
     create: {
       description: "Create a version",
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
@@ -174,16 +204,25 @@ export const model = {
         if (g.releaseDate !== undefined) body.releaseDate = g.releaseDate;
         if (g.released !== undefined) body.released = g.released;
         if (g.startDate !== undefined) body.startDate = g.startDate;
-        const result = await create("/rest/api/3/version", body, {
-          site: g.site,
-          email: g.email,
-          token: g.token,
-        }) as ResourceData;
+        const result = await createOrAdopt(
+          "/rest/api/3/version",
+          body,
+          `/rest/api/3/project/${body.project}/versions`,
+          {
+            site: g.site,
+            email: g.email,
+            token: g.token,
+          },
+        ) as ResourceData;
         const handle = await context.writeResource(
           "state",
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -194,6 +233,10 @@ export const model = {
       }),
       execute: async (args: { id: string | number }, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const result = await read("/rest/api/3/version", args.id, {
           site: g.site,
           email: g.email,
@@ -206,6 +249,10 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -214,17 +261,16 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
-        const content = await context.dataRepository.getContent(
-          context.modelType,
-          context.modelId,
-          instanceName,
-        );
-        if (!content) throw new Error("No data found - run create first");
-        const existing = JSON.parse(new TextDecoder().decode(content));
+        const existing = await context.readResource(instanceName);
+        if (!existing) throw new Error("No data found - run create first");
         const body: Record<string, unknown> = {};
         if (g.archived !== undefined) body.archived = g.archived;
         if (g.description !== undefined) body.description = g.description;
@@ -251,6 +297,10 @@ export const model = {
           instanceName,
           result,
         );
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -261,6 +311,10 @@ export const model = {
       }),
       execute: async (args: { id: string | number }, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const { existed } = await remove("/rest/api/3/version", args.id, {
           site: g.site,
           email: g.email,
@@ -276,6 +330,10 @@ export const model = {
           status: existed ? "deleted" : "not_found",
           deletedAt: new Date().toISOString(),
         });
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -284,19 +342,18 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: any) => {
         const g = context.globalArgs;
+        context.logger.info("Running {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
+        });
         const instanceName = (g.name?.toString() ?? "current").replace(
           /[\/\\]/g,
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
-        const content = await context.dataRepository.getContent(
-          context.modelType,
-          context.modelId,
-          instanceName,
-        );
-        if (!content) {
+        const existing = await context.readResource(instanceName);
+        if (!existing) {
           throw new Error("No data found - run create or get first");
         }
-        const existing = JSON.parse(new TextDecoder().decode(content));
         const result = await tryRead(
           "/rest/api/3/version",
           existing.id ?? existing.id,
@@ -308,12 +365,20 @@ export const model = {
             instanceName,
             result,
           );
+          context.logger.info("Completed {method} on {type}", {
+            method: context.methodName,
+            type: context.modelType,
+          });
           return { dataHandles: [handle] };
         }
         const handle = await context.writeResource("state", instanceName, {
           id: existing.id ?? existing.id,
           status: "not_found",
           syncedAt: new Date().toISOString(),
+        });
+        context.logger.info("Completed {method} on {type}", {
+          method: context.methodName,
+          type: context.modelType,
         });
         return { dataHandles: [handle] };
       },
