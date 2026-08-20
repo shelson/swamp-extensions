@@ -17,7 +17,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with Swamp.  If not, see <https://www.gnu.org/licenses/>.
 
-// Auto-generated extension model for /jira/dashboard
+// Auto-generated extension model for @shelson/jira/dashboard
 // Do not edit manually. Re-generate with: deno task generate:jira
 
 // deno-lint-ignore-file no-explicit-any

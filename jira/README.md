@@ -1,4 +1,4 @@
-# /jira
+# @shelson/jira
 
 Auto-generated [swamp](https://github.com/swamp-club/swamp) extension models for
 Jira Cloud resources.
@@ -14,7 +14,7 @@ Available methods:
 - **delete** — remove the resource from Jira
 - **sync** — refresh all resource properties from the API
 
-Use `swamp model type describe /jira/<model>` to see the full list of
+Use `swamp model type describe @shelson/jira/<model>` to see the full list of
 configurable properties and available methods for a model.
 
 ## Authentication
@@ -55,7 +55,7 @@ Create an API token at
 
 ```bash
 # Create a new project model
-swamp model create /jira/project my-project
+swamp model create @shelson/jira/project my-project
 
 # Edit the model to configure its properties
 swamp model edit my-project
