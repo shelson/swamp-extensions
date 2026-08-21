@@ -31,7 +31,7 @@
  */
 
 import { z } from "npm:zod@4.3.6";
-import { checkCredentials, list, read, transitionIssue } from "./_lib/jira.ts";
+import { checkCredentials, create, list, read, transitionIssue } from "./_lib/jira.ts";
 
 const ArgsSchema = z.object({
   idOrKey: z.string().describe("The ID or key of the issue to transition"),
@@ -68,6 +68,36 @@ const SnapshotSchema = z.object({
   fetchedAt: z.string(),
 });
 
+/** Minimal Atlassian Document Format wrapper for a single plain-text paragraph. */
+export function adfParagraph(text: string): Record<string, unknown> {
+  return {
+    type: "doc",
+    version: 1,
+    content: [
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text },
+        ],
+      },
+    ],
+  };
+}
+
+export const CommentArgsSchema = z.object({
+  idOrKey: z.string().describe("The ID or key of the issue to comment on"),
+  body: z.string().min(1).describe(
+    "Plain-text comment body (wrapped in a minimal ADF paragraph)",
+  ),
+});
+
+export const CommentSchema = z.object({
+  idOrKey: z.string(),
+  commentId: z.string(),
+  body: z.string(),
+  commentedAt: z.string(),
+});
+
 /** Extends @shelson/jira/issue with a transition-by-name convenience method. */
 export const extension = {
   type: "@shelson/jira/issue",
@@ -84,6 +114,15 @@ export const extension = {
         "rather than the model's `name` global argument — safe to call " +
         "against many issues from a single shared model instance.",
       schema: SnapshotSchema,
+      lifetime: "infinite",
+      garbageCollection: 5,
+    },
+    comment: {
+      description:
+        "A comment posted to a Jira issue via addComment. Keyed per-issue " +
+        "so a single comment can be referenced by the factory's " +
+        "resultEvidence gate.",
+      schema: CommentSchema,
       lifetime: "infinite",
       garbageCollection: 5,
     },
@@ -107,8 +146,78 @@ export const extension = {
         });
       },
     },
+    "comment-credentials": {
+      description:
+        "Validates the Jira site, email, and API token resolve and authenticate before commenting on an issue",
+      labels: ["live"],
+      appliesTo: ["addComment"],
+      execute: async (
+        context: {
+          globalArgs: { site?: string; email?: string; token?: string };
+        },
+      ) => {
+        const g = context.globalArgs;
+        return await checkCredentials({
+          site: g.site,
+          email: g.email,
+          token: g.token,
+        });
+      },
+    },
   }],
   methods: [
+    {
+      addComment: {
+        description:
+          "Post a comment on a Jira issue by id or key, independent of the " +
+          "model's `name` global argument — so one shared model instance can " +
+          "comment on many issues without collisions.",
+        arguments: CommentArgsSchema,
+        execute: async (
+          args: z.infer<typeof CommentArgsSchema>,
+          context: {
+            globalArgs: { site?: string; email?: string; token?: string };
+            methodName: string;
+            logger: {
+              info: (msg: string, props?: Record<string, unknown>) => void;
+            };
+            writeResource: (
+              specName: string,
+              name: string,
+              data: Record<string, unknown>,
+            ) => Promise<{ name: string }>;
+          },
+        ) => {
+          const g = context.globalArgs;
+          context.logger.info("Running {method} on {idOrKey}", {
+            method: context.methodName,
+            idOrKey: args.idOrKey,
+          });
+          const credentials = { site: g.site, email: g.email, token: g.token };
+          const result = await create(
+            `/rest/api/3/issue/${encodeURIComponent(args.idOrKey)}/comment`,
+            { body: adfParagraph(args.body) },
+            credentials,
+          ) as { id?: string };
+          const instanceName = `comment-${args.idOrKey}`
+            .replace(/[\/\\]/g, "_")
+            .replace(/\.\./g, "_")
+            .replace(/\0/g, "");
+          const handle = await context.writeResource("comment", instanceName, {
+            idOrKey: args.idOrKey,
+            commentId: result.id ?? "unknown",
+            body: args.body,
+            commentedAt: new Date().toISOString(),
+          });
+          context.logger.info("Completed {method} on {idOrKey} (comment {commentId})", {
+            method: context.methodName,
+            idOrKey: args.idOrKey,
+            commentId: result.id,
+          });
+          return { dataHandles: [handle] };
+        },
+      },
+    },
     {
       fetchByKey: {
         description:
