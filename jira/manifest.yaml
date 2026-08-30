@@ -1,7 +1,7 @@
 # Auto-generated manifest. Re-generate with the appropriate deno task.
 manifestVersion: 1
 name: "@shelson/jira"
-version: "2026.08.21.1"
+version: "2026.08.30.2"
 description: "Jira Cloud platform models"
 repository: "https://github.com/shelson/swamp-extensions"
 labels:
@@ -9,8 +9,7 @@ labels:
   - atlassian
   - project-management
 releaseNotes: |
-  - Added: component, dashboard, field_scheme, filter, issue, issue_link, issue_link_type, issue_type, permission_scheme, plan, priority, project, project_category, resolution, role, version, workflow_scheme
-  - Added: transitionByName/fetchByKey convenience methods on issue (issue_transitions.ts)
+  - Added: addComment method on issue (issue_transitions.ts) — POST a comment on any issue by id/key, independent of the model's name global argument.
 models:
   - component.ts
   - dashboard.ts

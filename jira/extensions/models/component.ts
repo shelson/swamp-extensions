@@ -354,7 +354,7 @@ export const model = {
         const result = await createOrAdopt(
           "/rest/api/3/component",
           body,
-          "/rest/api/3/component",
+          `/rest/api/3/project/${body.project}/component`,
           {
             site: g.site,
             email: g.email,
@@ -469,7 +469,7 @@ export const model = {
           "_",
         ).replace(/\.\./g, "_").replace(/\0/g, "");
         const handle = await context.writeResource("state", instanceName, {
-          id: args.id,
+          id: String(args.id),
           existed,
           status: existed ? "deleted" : "not_found",
           deletedAt: new Date().toISOString(),
