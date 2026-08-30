@@ -1223,13 +1223,12 @@ export const model = {
         if (result.id === undefined) {
           const a = issueKeyOf(g.inwardIssue);
           const b = issueKeyOf(g.outwardIssue);
-          const typeName = issueKeyOf(g.type);
+          const typeName = g.type?.name;
           if (a && b) {
             const id = await findLinkBetween(a, b, typeName, credentials) ??
               await findLinkBetween(b, a, typeName, credentials);
             if (id !== undefined) {
               result.id = id;
-              result.typeName = typeName;
               result.inwardIssue = { key: a };
               result.outwardIssue = { key: b };
             }
@@ -1299,7 +1298,7 @@ export const model = {
         if (resolvedId === undefined || String(resolvedId) === "") {
           const a = issueKeyOf(g.inwardIssue);
           const b = issueKeyOf(g.outwardIssue);
-          const typeName = issueKeyOf(g.type);
+          const typeName = g.type?.name;
           if (a && b) {
             resolvedId = await findLinkBetween(a, b, typeName, credentials) ??
               await findLinkBetween(b, a, typeName, credentials);
@@ -1358,7 +1357,7 @@ export const model = {
           // create run before id resolution was added).
           const a = issueKeyOf(g.inwardIssue);
           const b = issueKeyOf(g.outwardIssue);
-          const typeName = issueKeyOf(g.type);
+          const typeName = g.type?.name;
           if (a && b) {
             linkId = await findLinkBetween(a, b, typeName, credentials) ??
               await findLinkBetween(b, a, typeName, credentials);
