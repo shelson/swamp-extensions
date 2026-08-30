@@ -31,7 +31,13 @@
  */
 
 import { z } from "npm:zod@4.3.6";
-import { checkCredentials, create, list, read, transitionIssue } from "./_lib/jira.ts";
+import {
+  checkCredentials,
+  create,
+  list,
+  read,
+  transitionIssue,
+} from "./_lib/jira.ts";
 
 const ArgsSchema = z.object({
   idOrKey: z.string().describe("The ID or key of the issue to transition"),
@@ -198,22 +204,35 @@ export const extension = {
             `/rest/api/3/issue/${encodeURIComponent(args.idOrKey)}/comment`,
             { body: adfParagraph(args.body) },
             credentials,
-          ) as { id?: string };
+          ) as { id?: string; errorMessages?: string[] };
+          // create() doesn't throw on a 404 body (that's left to callers) —
+          // a missing issue/comment id means the comment was never actually
+          // posted, so treat it as a failure instead of silently succeeding.
+          if (!result.id) {
+            throw new Error(
+              `Failed to add comment to ${args.idOrKey}: ${
+                result.errorMessages?.join("; ") ?? JSON.stringify(result)
+              }`,
+            );
+          }
           const instanceName = `comment-${args.idOrKey}`
             .replace(/[\/\\]/g, "_")
             .replace(/\.\./g, "_")
             .replace(/\0/g, "");
           const handle = await context.writeResource("comment", instanceName, {
             idOrKey: args.idOrKey,
-            commentId: result.id ?? "unknown",
+            commentId: result.id,
             body: args.body,
             commentedAt: new Date().toISOString(),
           });
-          context.logger.info("Completed {method} on {idOrKey} (comment {commentId})", {
-            method: context.methodName,
-            idOrKey: args.idOrKey,
-            commentId: result.id,
-          });
+          context.logger.info(
+            "Completed {method} on {idOrKey} (comment {commentId})",
+            {
+              method: context.methodName,
+              idOrKey: args.idOrKey,
+              commentId: result.id,
+            },
+          );
           return { dataHandles: [handle] };
         },
       },
