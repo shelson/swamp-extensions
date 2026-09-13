@@ -1,0 +1,21 @@
+manifestVersion: 1
+name: "@shelson/minecraft-worlds"
+version: "2026.09.14.2"
+description: >-
+  Minecraft: Java Edition world seed analysis via the cubiomes C library.
+  One model instance is one world (seed + game version); methods locate
+  structures (villages, monuments, fortresses, ...), sample biomes, and
+  estimate the spawn point.
+
+models:
+  - mc_world.ts
+
+additionalFiles:
+  - README.md
+  - LICENSE
+
+binaries:
+  - bin/cubiomes-cli
+
+platforms:
+  - darwin-aarch64
