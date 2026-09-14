@@ -273,17 +273,34 @@ interface MethodContext {
   logger: MethodLogger;
 }
 
+/** Map Deno platform to the matching prebuilt cubiomes-cli binary name. */
+function platformBinary(): string | null {
+  const { os, arch } = Deno.build;
+  if (os === "linux" && arch === "x86_64") return "cubiomes-cli-linux-x86_64";
+  if (os === "darwin" && arch === "aarch64") return "cubiomes-cli-darwin-arm64";
+  return null;
+}
+
 /** Locate the bundled cubiomes-cli helper binary. */
 async function resolveBin(ctx: MethodContext): Promise<string> {
+  const name = platformBinary();
+  if (!name) {
+    throw new Error(
+      `No prebuilt cubiomes-cli for ${Deno.build.os}-${Deno.build.arch}. ` +
+        "Build from source with zig: zig cc -target <triple> -O3 -fwrapv " +
+        "-o bin/cubiomes-cli-<platform> cubiomes-master/cubiomes_cli.c " +
+        "cubiomes-master/*.o -lm -pthread",
+    );
+  }
   const candidates: string[] = [];
   if (typeof ctx.extensionFile === "function") {
     try {
-      candidates.push(ctx.extensionFile("bin/cubiomes-cli"));
+      candidates.push(ctx.extensionFile(`bin/${name}`));
     } catch {
       // extensionFile unavailable for this load mode; fall through
     }
   }
-  candidates.push("bin/cubiomes-cli"); // repo root (cwd) fallback
+  candidates.push(`bin/${name}`); // repo root (cwd) fallback
   for (const path of candidates) {
     try {
       const stat = await Deno.stat(path);
@@ -294,7 +311,7 @@ async function resolveBin(ctx: MethodContext): Promise<string> {
   }
   throw new Error(
     `cubiomes-cli binary not found (tried: ${candidates.join(", ")}). ` +
-      "Build it with: cc -O3 -fwrapv -o bin/cubiomes-cli " +
+      "Build it with: zig cc -target <triple> -O3 -fwrapv -o bin/cubiomes-cli-<platform> " +
       "cubiomes-master/cubiomes_cli.c cubiomes-master/libcubiomes.a -lm -pthread",
   );
 }
@@ -329,7 +346,7 @@ function sanitizeInstance(value: string): string {
 /** Model definition for Minecraft world seed analysis via cubiomes. */
 export const model = {
   type: "@shelson/minecraft-worlds",
-  version: "2026.09.14.2",
+  version: "2026.09.14.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     structures: {
@@ -381,15 +398,6 @@ export const model = {
       garbageCollection: 10,
     },
   },
-  upgrades: [
-    {
-      toVersion: "2026.09.14.2",
-      description:
-        "Add strongholds, slimeChunks, locateBiome and biomeMap methods; " +
-        "no globalArguments schema change",
-      upgradeAttributes: (old: Record<string, unknown>) => old,
-    },
-  ],
   methods: {
     findStructures: {
       description:

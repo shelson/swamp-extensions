@@ -1,6 +1,7 @@
 manifestVersion: 1
 name: "@shelson/minecraft-worlds"
-version: "2026.09.14.2"
+version: "2026.09.14.1"
+repository: "https://github.com/shelson/swamp-extensions"
 description: >-
   Minecraft: Java Edition world seed analysis via the cubiomes C library.
   One model instance is one world (seed + game version); methods locate
@@ -15,7 +16,9 @@ additionalFiles:
   - LICENSE
 
 binaries:
-  - bin/cubiomes-cli
+  - bin/cubiomes-cli-linux-x86_64
+  - bin/cubiomes-cli-darwin-arm64
 
 platforms:
+  - linux-x86_64
   - darwin-aarch64
