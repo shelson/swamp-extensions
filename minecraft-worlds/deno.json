@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/denoland/deno/main/cli/schemas/config-file.v1.json",
+  "nodeModulesDir": "auto",
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  },
+  "tasks": {
+    "check": "deno check extensions/models/mc_world.ts extensions/models/mc_world_test.ts extensions/models/mc_world_model_test.ts",
+    "test": "deno test --allow-run --allow-read extensions/models/"
+  }
+}

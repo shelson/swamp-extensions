@@ -34,3 +34,6 @@ next-prompt.md
 # Tmp until i get them working better
 .github/
 scripts/
+
+# node_modules
+**/node_modules/
