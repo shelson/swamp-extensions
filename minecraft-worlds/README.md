@@ -1,6 +1,6 @@
 # @shelson/minecraft-worlds
 
-Minecraft: Java Edition world seed analysis for [swamp](https://github.com/swamp-club/swamp), powered by the [cubiomes](https://github.com/Cubitect/cubiomes) C library.
+Minecraft: Java Edition world seed analysis for [swamp](https://github.com/swamp-club/swamp), powered by the [cubiomes](https://github.com/Cubitect/cubiomes) C library (vendored from the maintained [xpple/cubiomes](https://github.com/xpple/cubiomes) fork, which supports versions up to 26.3).
 
 One model instance represents one world (a seed plus a game version). Methods answer questions about that world — where structures generate, what biome is at a position, where you spawn, where the strongholds and slime chunks are — and store the answers as versioned, queryable data resources.
 
@@ -11,12 +11,14 @@ All world generation math is done by a small helper binary, `cubiomes-cli`, whic
 ## Building the helper binary
 
 ```bash
-make -C cubiomes-master   # only if libcubiomes.a is missing
-cc -O3 -fwrapv -Wall -Wextra -o bin/cubiomes-cli \
-  cubiomes-master/cubiomes_cli.c cubiomes-master/libcubiomes.a -lm -pthread
+cli/build.sh                 # all platforms
+cli/build.sh linux-x86_64    # just one
 ```
 
-No other dependencies — cubiomes is self-contained C99.
+This needs [zig](https://ziglang.org), which is used as a cross-compiling C compiler. The layout is:
+
+- `cubiomes/`: an unmodified vendored copy of the library. `cubiomes/VENDORED.md` records the pinned commit and how to update it.
+- `cli/cubiomes_cli.c`: the JSON wrapper that the model calls.
 
 ## Usage
 
@@ -48,7 +50,9 @@ swamp data query 'modelName == "myworld" && specName == "structures"' \
   --select 'content.results.filter(r, r.x > 2000.0)'
 ```
 
-Supported structure types include `village`, `monument`, `mansion`, `ancient_city`, `outpost`, `fortress`, `bastion`, `end_city`, `trail_ruins`, `trial_chambers` and more (`bin/cubiomes-cli enums` for the full list). Structure positions are biome-checked, so only locations where the structure actually generates are reported.
+Supported structure types include `village`, `monument`, `mansion`, `ancient_city`, `outpost`, `fortress`, `bastion`, `end_city`, `trail_ruins`, `trial_chambers`, `abandoned_camp` (26.3+) and more (`bin/cubiomes-cli enums` for the full list). Structure positions are biome-checked, so only locations where the structure actually generates are reported.
+
+Versions run from Beta 1.7 up to `26.3`. New biomes such as `sulfur_caves` (26.2) and `dappled_forest` (26.3) work with `biomeAt`, `locateBiome` and `biomeMap`. A bare minor version like `1.21` means the latest release in that line, which is currently `1.21.11`.
 
 ## Development
 
@@ -57,8 +61,8 @@ Supported structure types include `village`, `monument`, `mansion`, `ancient_cit
 ~/.swamp/deno/deno test --allow-run --allow-read extensions/models/mc_world_test.ts
 ```
 
-New question types are added as subcommands in `cubiomes-master/cubiomes_cli.c` (emitting JSON) plus a thin method in `extensions/models/mc_world.ts`.
+New question types are added as subcommands in `cli/cubiomes_cli.c` (emitting JSON) plus a thin method in `extensions/models/mc_world.ts`.
 
 ## Platforms
 
-The shipped binary is built for `darwin-aarch64`. For other platforms, rebuild with the command above on the target host — the source has no platform-specific dependencies.
+Binaries ship for `linux-x86_64` (glibc 2.17+) and `darwin-aarch64`. For another platform, add a zig target triple to `cli/build.sh`. The C source has no platform-specific dependencies.

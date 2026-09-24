@@ -37,7 +37,8 @@ static const char *MC_NAMES[] = {
     "1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8",
     "1.9", "1.10", "1.11", "1.12", "1.13", "1.14", "1.15", "1.16",
     "1.16.1", "1.17", "1.18", "1.19", "1.19.2", "1.20", "1.21",
-    "1.21.1", "1.21.3",
+    "1.21.1", "1.21.3", "1.21.4", "1.21.5", "1.21.6", "1.21.9", "1.21.11",
+    "26.1", "26.2", "26.3",
 };
 
 static const struct { const char *name; int stype; } STRUCT_TAB[] = {
@@ -64,6 +65,7 @@ static const struct { const char *name; int stype; } STRUCT_TAB[] = {
     {"end_city", End_City},
     {"trail_ruins", Trail_Ruins},
     {"trial_chambers", Trial_Chambers},
+    {"abandoned_camp", Abandoned_Camp},
 };
 
 static const struct { const char *name; int dim; } DIM_TAB[] = {

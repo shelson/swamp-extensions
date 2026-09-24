@@ -8,8 +8,10 @@
  */
 import { assert, assertEquals } from "jsr:@std/assert@1";
 
-const BIN = "bin/cubiomes-cli";
-/** Fixture: seed/mc/radius matching cubiomes-master/findvillages.c. */
+const BIN = `bin/cubiomes-cli-${
+  Deno.build.os === "darwin" ? "darwin-arm64" : "linux-x86_64"
+}`;
+/** Fixture: seed/mc/radius matching upstream cubiomes' findvillages.c. */
 const FIXTURE = {
   seed: "134344508856247344",
   mc: "1.20",
@@ -245,7 +247,52 @@ Deno.test({
   fn: async () => {
     const d = await runCli(["enums"]);
     assert((d.mcVersions as string[]).includes("1.20"));
+    assert((d.mcVersions as string[]).includes("26.3"));
     assert((d.structures as string[]).includes("village"));
+    assert((d.structures as string[]).includes("abandoned_camp"));
     assert((d.dimensions as string[]).includes("overworld"));
+  },
+});
+
+
+for (
+  const { biome, mc, y } of [
+    { biome: "sulfur_caves", mc: "26.2", y: "0" },
+    { biome: "dappled_forest", mc: "26.3", y: "63" },
+  ]
+) {
+  Deno.test({
+    name: `locate-biome finds ${biome} (new in ${mc})`,
+    ignore: !binExists(),
+    fn: async () => {
+      const args = ["--seed", FIXTURE.seed, "--mc", mc, "--y", y];
+      const loc = await runCli(["locate-biome", ...args, "--biome", biome]);
+      assertEquals(loc.found, true);
+      const at = await runCli([
+        "biome-at",
+        ...args,
+        "--x",
+        String(loc.x),
+        "--z",
+        String(loc.z),
+      ]);
+      assertEquals(at.biomeName, biome);
+    },
+  });
+}
+
+Deno.test({
+  name: "abandoned camps generate in 26.3 and are rejected before it",
+  ignore: !binExists(),
+  fn: async () => {
+    const args = ["--seed", FIXTURE.seed, "--structure", "abandoned_camp"];
+    const d = await runCli(["find-structures", ...args, "--mc", "26.3"]);
+    assert((d.count as number) > 0);
+    const old = await new Deno.Command(BIN, {
+      args: ["find-structures", ...args, "--mc", "1.21"],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(old.code, 1);
   },
 });
