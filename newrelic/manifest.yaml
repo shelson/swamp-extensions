@@ -1,0 +1,55 @@
+manifestVersion: 1
+name: '@shelson/newrelic'
+version: "2026.09.25.1"
+description: |
+  New Relic entity model types backed by the NerdGraph GraphQL API
+  (https://api.newrelic.com/graphql). One model type per entity kind —
+  dashboard, alert policy, NRQL alert condition, muting rule, workflow,
+  notification destination, notification channel, synthetic monitor, synthetics private location,
+  and a read-only account/permissions type — each with the same
+  create/update/delete/lookup lifecycle plus a zero-arg sync for drift
+  detection.
+
+  ## Prerequisites
+
+  A New Relic USER API key (NRAK-…) supplied as the `apiKey` global argument,
+  ideally via a vault expression.
+
+  ## Usage
+
+  ```bash
+  swamp model create @shelson/newrelic-dashboard my-dashboard \
+    --global-arg accountId=12345678 \
+    --global-arg 'apiKey=${{ vault.get("nr", "apiKey") }}'
+  swamp model method run my-dashboard create --input dashboard="$(cat dash.json)"
+  swamp model method run my-dashboard lookup --input name="My dashboard"
+  ```
+repository: https://github.com/shelson/swamp-extensions
+models:
+  - account.ts
+  - alert_condition.ts
+  - alert_policy.ts
+  - dashboard.ts
+  - muting_rule.ts
+  - notification_channel.ts
+  - notification_destination.ts
+  - private_location.ts
+  - synthetic_monitor.ts
+  - workflow.ts
+skills:
+  - newrelic-models
+workflows: []
+vaults: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+labels:
+  - newrelic
+  - observability
+  - nerdgraph
+  - dashboards
+  - alerting
+  - synthetics
+  - notifications
