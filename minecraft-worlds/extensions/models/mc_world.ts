@@ -43,6 +43,14 @@ const MC_VERSIONS = [
   "1.21",
   "1.21.1",
   "1.21.3",
+  "1.21.4",
+  "1.21.5",
+  "1.21.6",
+  "1.21.9",
+  "1.21.11",
+  "26.1",
+  "26.2",
+  "26.3",
 ] as const;
 
 /** Structure types supported by cubiomes finders. */
@@ -70,6 +78,7 @@ const STRUCTURE_TYPES = [
   "end_city",
   "trail_ruins",
   "trial_chambers",
+  "abandoned_camp",
 ] as const;
 
 const DIMENSIONS = ["overworld", "nether", "end"] as const;
@@ -177,7 +186,13 @@ const BiomeSearchOutputSchema = z.object({
   dimension: z.string(),
   biome: z.string(),
   biomeId: z.number().int(),
+  /** Search parameters: center, height sampled, and radius in blocks. */
+  centerX: z.number().int(),
+  centerZ: z.number().int(),
+  y: z.number().int(),
+  radius: z.number().int(),
   found: z.boolean(),
+  /** Position of the nearest match (meaningful only when found). */
   x: z.number().int(),
   z: z.number().int(),
 });
@@ -287,9 +302,7 @@ async function resolveBin(ctx: MethodContext): Promise<string> {
   if (!name) {
     throw new Error(
       `No prebuilt cubiomes-cli for ${Deno.build.os}-${Deno.build.arch}. ` +
-        "Build from source with zig: zig cc -target <triple> -O3 -fwrapv " +
-        "-o bin/cubiomes-cli-<platform> cubiomes-master/cubiomes_cli.c " +
-        "cubiomes-master/*.o -lm -pthread",
+        "Add a target to cli/build.sh and build it from source with zig.",
     );
   }
   const candidates: string[] = [];
@@ -311,8 +324,7 @@ async function resolveBin(ctx: MethodContext): Promise<string> {
   }
   throw new Error(
     `cubiomes-cli binary not found (tried: ${candidates.join(", ")}). ` +
-      "Build it with: zig cc -target <triple> -O3 -fwrapv -o bin/cubiomes-cli-<platform> " +
-      "cubiomes-master/cubiomes_cli.c cubiomes-master/libcubiomes.a -lm -pthread",
+      "Build it with: cli/build.sh",
   );
 }
 
@@ -346,8 +358,16 @@ function sanitizeInstance(value: string): string {
 /** Model definition for Minecraft world seed analysis via cubiomes. */
 export const model = {
   type: "@shelson/minecraft-worlds",
-  version: "2026.09.14.1",
+  version: "2026.09.25.1",
   globalArguments: GlobalArgsSchema,
+  upgrades: [
+    {
+      toVersion: "2026.09.25.1",
+      description:
+        "Switch to xpple/cubiomes; mcVersion gains 1.21.4-1.21.11 and 26.1-26.3 (additive, no field changes)",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     structures: {
       description:
@@ -542,6 +562,9 @@ export const model = {
         _args: Record<string, never>,
         ctx: MethodContext,
       ) => {
+        ctx.logger.info("Estimating spawn point", {
+          seed: ctx.globalArgs.seed,
+        });
         const bin = await resolveBin(ctx);
         const raw = CliSpawnSchema.parse(
           await runCli(bin, [
@@ -552,9 +575,6 @@ export const model = {
             ctx.globalArgs.mcVersion,
           ]),
         );
-        ctx.logger.info("Estimating spawn point", {
-          seed: ctx.globalArgs.seed,
-        });
         const handle = await ctx.writeResource("spawn", "spawn-point", {
           seed: ctx.globalArgs.seed,
           mcVersion: ctx.globalArgs.mcVersion,
@@ -602,6 +622,7 @@ export const model = {
             results: raw.results,
           },
         );
+        ctx.logger.info("Located {count} strongholds", { count: raw.count });
         return { dataHandles: [handle] };
       },
     },
@@ -709,7 +730,8 @@ export const model = {
         const handle = await ctx.writeResource(
           "biomeSearch",
           sanitizeInstance(
-            `biomesearch-${args.biome}-${args.dimension}-${args.x}_${args.z}`,
+            `biomesearch-${args.biome}-${args.dimension}-` +
+              `${args.x}_${args.y}_${args.z}-r${args.radius}`,
           ),
           {
             seed: ctx.globalArgs.seed,
@@ -717,6 +739,10 @@ export const model = {
             dimension: args.dimension,
             biome: args.biome,
             biomeId: raw.biomeId,
+            centerX: args.x,
+            centerZ: args.z,
+            y: args.y,
+            radius: args.radius,
             found: raw.found,
             x: raw.x,
             z: raw.z,

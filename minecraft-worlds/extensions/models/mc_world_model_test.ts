@@ -143,7 +143,7 @@ Deno.test("strongholds writes ordered results", async () => {
     ],
     count: 2,
   });
-  const { mock, getWrittenResources } = runMethod(
+  const { mock, getWrittenResources, getLogsByLevel } = runMethod(
     model.methods.strongholds.execute,
     { count: 3 },
     { stdout, code: 0 },
@@ -155,6 +155,8 @@ Deno.test("strongholds writes ordered results", async () => {
   const results = (written[0].data as { results: { index: number }[] })
     .results;
   assertEquals(results.map((r) => r.index), [0, 1]);
+  // entry + completion logs
+  assert(getLogsByLevel("info").length >= 2);
 });
 
 Deno.test("slimeChunks writes chunk results", async () => {
@@ -174,7 +176,8 @@ Deno.test("slimeChunks writes chunk results", async () => {
   assertEquals((written[0].data as { count: number }).count, 1);
 });
 
-Deno.test("locateBiome writes the search outcome", async () => {
+/** Run locateBiome with a mocked CLI hit at the given search height. */
+async function runLocate(y: number) {
   const stdout = JSON.stringify({
     biomeId: 185,
     x: -1572,
@@ -187,19 +190,37 @@ Deno.test("locateBiome writes the search outcome", async () => {
       biome: "cherry_grove",
       x: 0,
       z: 0,
-      y: 63,
+      y,
       radius: 6400,
       dimension: "overworld",
     },
     { stdout, code: 0 },
   );
   await mock;
-  const written = getWrittenResources();
-  assertEquals(written[0].specName, "biomeSearch");
-  assertEquals(written[0].name, "biomesearch_cherry_grove_overworld_0_0");
-  const data = written[0].data as Record<string, unknown>;
+  return getWrittenResources()[0];
+}
+
+Deno.test("locateBiome writes the search outcome and its parameters", async () => {
+  const written = await runLocate(63);
+  assertEquals(written.specName, "biomeSearch");
+  assertEquals(written.name, "biomesearch_cherry_grove_overworld_0_63_0_r6400");
+  const data = written.data as Record<string, unknown>;
   assertEquals(data.found, true);
   assertEquals(data.biomeId, 185);
+  assertEquals(data.x, -1572);
+  assertEquals(data.z, -3368);
+  assertEquals(
+    [data.centerX, data.centerZ, data.y, data.radius],
+    [0, 0, 63, 6400],
+  );
+});
+
+Deno.test("locateBiome searches at different heights do not collide", async () => {
+  // Cave biomes (e.g. sulfur_caves) only exist deep down, so the same biome is
+  // routinely searched at several y levels from one center.
+  const surface = await runLocate(63);
+  const deep = await runLocate(0);
+  assert(surface.name !== deep.name, `both wrote ${surface.name}`);
 });
 
 Deno.test("biomeMap passes legend and cells through", async () => {
@@ -272,13 +293,15 @@ Deno.test("a CLI error rejects and writes nothing", async () => {
 });
 
 Deno.test("invalid CLI JSON rejects and writes nothing", async () => {
-  const { mock, getWrittenResources } = runMethod(
+  const { mock, getWrittenResources, getLogsByLevel } = runMethod(
     model.methods.spawn.execute,
     {},
     { stdout: "this is not json", code: 0 },
   );
   await assertRejects(() => mock, Error, "invalid JSON");
   assertEquals(getWrittenResources().length, 0);
+  // The entry log is emitted before the CLI runs, so it survives the failure.
+  assertEquals(getLogsByLevel("info").length, 1);
 });
 
 Deno.test("CLI output failing schema validation rejects and writes nothing", async () => {
