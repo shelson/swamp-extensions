@@ -1,0 +1,81 @@
+id: 7a28bbb7-5496-42fa-b652-336c19e1dcbd
+name: "@shelson/k3s/k3s-install-and-verify"
+description: >-
+  Install k3s on a target and verify the node is Ready. When a
+  @swamp/kubernetes/node model is supplied, sync nodes to confirm the exported
+  kubeconfig reaches the cluster.
+version: 1
+tags:
+  extension: "@shelson/k3s"
+  category: provisioning
+inputs:
+  properties:
+    k3sModel:
+      type: string
+      description: Name of the @shelson/k3s model instance to install and verify.
+    nodeModel:
+      type: string
+      default: ""
+      description: >-
+        Optional @swamp/kubernetes/node model instance. When set, the workflow
+        syncs nodes through it to confirm the cluster is reachable.
+  required:
+    - k3sModel
+jobs:
+  - name: provision
+    description: Install k3s and wait for the node to report Ready.
+    steps:
+      - name: install
+        description: Run the official k3s installer and wait for the node.
+        task:
+          type: model_method
+          modelIdOrName: ${{ inputs.k3sModel }}
+          methodName: install
+  - name: verify
+    description: Read back k3s status and assert the cluster is healthy.
+    dependsOn:
+      - job: provision
+        condition:
+          type: succeeded
+    steps:
+      - name: status
+        description: Capture the current k3s service and node status.
+        task:
+          type: model_method
+          modelIdOrName: ${{ inputs.k3sModel }}
+          methodName: status
+      - name: node-ready
+        description: Assert the k3s node reports Ready.
+        task:
+          type: assert
+          expr: >-
+            data.latest(inputs.k3sModel, "status").attributes.ready == true
+          message: >-
+            k3s node is not Ready on ${{ inputs.k3sModel }}
+          severity: high
+      - name: service-active
+        description: Assert the k3s systemd service is active.
+        task:
+          type: assert
+          expr: >-
+            data.latest(inputs.k3sModel, "status").attributes.serviceActive == true
+          message: >-
+            k3s service is not active on ${{ inputs.k3sModel }}
+          severity: high
+  - name: kubernetes
+    description: Optionally confirm @swamp/kubernetes can reach the cluster.
+    dependsOn:
+      - job: verify
+        condition:
+          type: succeeded
+    steps:
+      - name: sync-nodes
+        description: >-
+          Sync nodes through the @swamp/kubernetes/node model. Skipped when no
+          node model is supplied.
+        guard: ${{ inputs.nodeModel == "" }}
+        task:
+          type: model_method
+          modelIdOrName: ${{ inputs.nodeModel }}
+          methodName: list
+    weight: 0

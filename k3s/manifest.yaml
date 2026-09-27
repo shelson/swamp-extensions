@@ -1,0 +1,38 @@
+manifestVersion: 1
+name: '@shelson/k3s'
+version: "2026.09.28.1"
+description: |
+  Install and operate k3s on a local or SSH-reachable host using the official
+  get.k3s.io installer. Waits for the node to report Ready, exports a remotely
+  usable kubeconfig, and reports node/service status.
+
+  ## Usage
+
+  ```bash
+  swamp model create @shelson/k3s my-k3s \
+    --global-arg host=my-host \
+    --global-arg user=deploy \
+    --global-arg identityFile=~/.ssh/id_ed25519
+
+  swamp model method run my-k3s install
+  swamp model method run my-k3s status
+  ```
+
+  The exported kubeconfig can be consumed by `@swamp/kubernetes` models via
+  `kubeconfig: ${{ data.latest("my-k3s", "kubeconfig-file").path }}`.
+repository: https://github.com/shelson/swamp-extensions
+models:
+  - k3s.ts
+workflows:
+  - k3s-install-and-verify.yaml
+vaults: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+labels:
+  - kubernetes
+  - k3s
+  - ssh
+  - provisioning
