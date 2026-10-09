@@ -8,10 +8,22 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { assertNoErrors, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const RESULT =
   `guid name description key locationId domainId accountId shared verifiedScriptExecution`;
+
+interface PrivateLocation extends Record<string, unknown> {
+  guid: string;
+  name: string;
+  accountId?: number;
+}
 
 const definition = nrModel({
   type: "@shelson/newrelic-private-location",
@@ -25,6 +37,39 @@ const definition = nrModel({
   syncKey: "guid",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<PrivateLocation>({
+      description:
+        "List every synthetics private location in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (p) => p.guid,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const query =
+          `domain = 'SYNTH' AND type = 'PRIVATE_LOCATION' AND accountId = ${nr.accountId}`;
+        const data = await nr.query<{
+          actor: {
+            entitySearch: {
+              results: {
+                entities: PrivateLocation[];
+                nextCursor: string | null;
+              };
+            };
+          };
+        }>(
+          `query($query: String!, $cursor: String) {
+             actor { entitySearch(query: $query) {
+               results(cursor: $cursor) {
+                 entities { guid name accountId }
+                 nextCursor
+               }
+             } }
+           }`,
+          { query, cursor },
+        );
+        const result = data.actor.entitySearch.results;
+        return { items: result.entities, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a private location",
@@ -176,5 +221,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-private-location",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

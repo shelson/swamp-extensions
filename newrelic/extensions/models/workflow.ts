@@ -7,7 +7,13 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { assertNoErrors, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const MutingRulesHandling = z.enum([
   "DONT_NOTIFY_FULLY_MUTED_ISSUES",
@@ -35,6 +41,12 @@ const FIELDS =
   destinationConfigurations { channelId name type }
   issuesFilter { id name type predicates { attribute operator values } }`;
 
+interface AiWorkflow extends Record<string, unknown> {
+  id: string;
+  name: string;
+  workflowEnabled?: boolean;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-workflow",
   description: "New Relic applied-intelligence workflow",
@@ -46,6 +58,39 @@ const definition = nrModel({
   syncKey: "id",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<AiWorkflow>({
+      description:
+        "List every applied-intelligence workflow in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (w) => w.id,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const data = await nr.query<{
+          actor: {
+            account: {
+              aiWorkflows: {
+                workflows: {
+                  entities: AiWorkflow[];
+                  nextCursor: string | null;
+                };
+              };
+            };
+          };
+        }>(
+          `query($accountId: Int!, $cursor: String) {
+             actor { account(id: $accountId) { aiWorkflows {
+               workflows(cursor: $cursor) {
+                 entities { id name workflowEnabled destinationsEnabled mutingRulesHandling }
+                 nextCursor
+               }
+             } } }
+           }`,
+          { accountId: nr.accountId, cursor },
+        );
+        const result = data.actor.account.aiWorkflows.workflows;
+        return { items: result.entities, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a workflow",
@@ -187,5 +232,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-workflow",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

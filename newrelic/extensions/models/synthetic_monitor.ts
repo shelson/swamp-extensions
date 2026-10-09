@@ -9,7 +9,13 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { assertNoErrors, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 /** Monitor kind → NerdGraph mutation name fragment. */
 const KINDS = {
@@ -39,6 +45,13 @@ const MonitorInput = z.looseObject({
 
 const FIELDS = `id guid name period status`;
 
+interface Monitor extends Record<string, unknown> {
+  guid: string;
+  name: string;
+  monitorType?: string;
+  period?: number;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-synthetic-monitor",
   description: "New Relic synthetic monitor",
@@ -51,6 +64,43 @@ const definition = nrModel({
   syncKey: "guid",
   idempotentCreate: true,
   nameFromArgs: (args: { monitor?: { name?: string } }) => args.monitor?.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<Monitor>({
+      description:
+        "List every synthetic monitor in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (m) => m.guid,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const query =
+          `domain = 'SYNTH' AND type = 'MONITOR' AND accountId = ${nr.accountId}`;
+        const data = await nr.query<{
+          actor: {
+            entitySearch: {
+              results: {
+                entities: Monitor[];
+                nextCursor: string | null;
+              };
+            };
+          };
+        }>(
+          `query($query: String!, $cursor: String) {
+             actor { entitySearch(query: $query) {
+               results(cursor: $cursor) {
+                 entities {
+                   guid
+                   name
+                   ... on SyntheticMonitorEntityOutline { monitorType period }
+                 }
+                 nextCursor
+               }
+             } }
+           }`,
+          { query, cursor },
+        );
+        const result = data.actor.entitySearch.results;
+        return { items: result.entities, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a synthetic monitor of the given type",
@@ -176,5 +226,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-synthetic-monitor",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

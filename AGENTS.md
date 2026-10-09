@@ -117,7 +117,7 @@ When building models that wrap external APIs:
 - **SDK timestamp fields may be `Date` or `string`.** Use `String(field)` or `field?.toISOString?.() ?? String(field)` to normalize. Don't assume the SDK returns strings — some versions return `Date` objects.
 - **Instance names must be collision-resistant.** For variable-length ID lists, hash the sorted IDs (e.g., SHA-1 prefix) rather than joining/truncating. Truncated joins produce collisions.
 - **Schema changes must be additive.** Adding new optional or nullable fields to resource schemas is safe. Adding new required fields, removing fields, or changing field types are breaking changes that require a coordinated version bump, explicit `RELEASE_NOTES.md` **Upgrade note**, and consideration of whether existing stored resources will fail validation on read. When in doubt, make new fields nullable with a sensible default.
-- **Every version bump requires `RELEASE_NOTES.md`.** Pass it to `swamp extension push --release-notes` when publishing. Without it, the registry gets generic placeholder text that tells users nothing. See the Release Notes section for format.
+- **Every version bump requires `RELEASE_NOTES.md`.** This is not optional. CI passes it to the registry and GitHub release. Without it, users pulling your extension have no idea what changed. See the Release Notes section for format.
 
 ## Commands
 
@@ -134,7 +134,7 @@ deno task test     # Run tests
 
 - CalVer format: `YYYY.MM.DD.N` (e.g., `2026.03.31.1`)
 - Bump version in `manifest.yaml` for each release
-- **ALWAYS bump `manifest.yaml` version in the first commit of a PR.** Do not defer to a follow-up. The version bump is what triggers a publish — forgetting it means the extension won't get published after merge.
+- **ALWAYS bump `manifest.yaml` version in the first commit of a PR.** Do not defer to a follow-up. The publish workflow keys off version changes — forgetting the bump means the extension won't publish after merge.
 - Pin all npm dependencies to exact versions in `deno.json` (no ranges)
 - Swamp's bundler inlines npm packages at bundle time; `deno.lock` does NOT cover extension deps
 
@@ -154,8 +154,8 @@ All changes go through pull requests — no direct pushes to main.
 4. **Run local adversarial review** — Before pushing, run `./scripts/local-adversarial-review.sh` to catch issues without waiting for CI. It auto-detects `claude` or `kiro-cli` (override with `--claude`/`--kiro`), runs a fast pattern-symmetry pre-check, then a full adversarial review matching the CI prompt. Fix findings before pushing to avoid slow review cycles.
 5. **Push and open PR** — Push the branch and open a PR against main. CI runs check/lint/fmt/test. The adversarial code review runs automatically on PRs.
 6. **Address review** — Fix any issues raised by CI or the adversarial review. Push additional commits (do not force-push over review comments).
-7. **Merge** — Once approved and CI passes, merge the PR (squash-merge preferred).
-8. **Publish** — After merge, check out `main`, pull, and run `swamp extension push manifest.yaml --release-notes RELEASE_NOTES.md --yes` from the extension directory.
+7. **Merge** — Comment `/lgtm`, `/approve`, or `/shipit` on the PR. The merge workflow squash-merges after verifying CI passed, then deletes the branch.
+8. **Publish** — After merge to main, CI runs again. Only after CI passes does the publish workflow run, auto-publishing any extensions with bumped `manifest.yaml` versions.
 
 **Version bumps**: Bump `version` in `manifest.yaml` (CalVer `YYYY.MM.DD.N`) in the same PR as the code change. Do not bump versions in separate commits or PRs.
 
@@ -163,18 +163,11 @@ All changes go through pull requests — no direct pushes to main.
 
 ## Publishing
 
-Publish manually after merging to main:
-
-```bash
-cd <extension-directory>
-swamp extension push manifest.yaml --release-notes RELEASE_NOTES.md --yes
-```
-
-Always pull latest `main` first. Publish only after CI passes on main — never push broken code.
+CI auto-publishes when `manifest.yaml` changes land on main and CI passes. The publish workflow triggers only after a successful CI run — it will not publish broken code. Do not push extensions locally — always open a PR and let CI handle publishing via `swamp extension push manifest.yaml --yes`.
 
 ## Release Notes
 
-Every version bump **must** include a `RELEASE_NOTES.md` in the extension directory. Pass it to `swamp extension push --release-notes`. Without it, the registry gets generic placeholder text that tells users nothing.
+Every version bump **must** include a `RELEASE_NOTES.md` in the extension directory. CI passes this to `swamp extension push --release-notes` and to `gh release create --notes`. Without it, the registry and GitHub release get generic placeholder text that tells users nothing.
 
 ### Format
 
@@ -197,7 +190,7 @@ the old behavior need to know.
 2. **Call out behavioral changes explicitly.** If a method that previously failed silently now returns data, say so. If log output changes, say so.
 3. **Include co-upgrade requirements.** If extension A depends on extension B at a specific version, state that both must be pulled together.
 4. **Keep it under 5000 characters** (the `--release-notes` flag limit).
-5. **Do not include the file in `additionalFiles` in the manifest.** It is consumed at publish time, not bundled into the published extension.
+5. **Do not include the file in `additionalFiles` in the manifest.** It is consumed by CI only, not bundled into the published extension.
 6. **Overwrite per version.** The file always describes the current version being published. Previous notes live in git history and GitHub releases.
 
 ## Swamp Skills

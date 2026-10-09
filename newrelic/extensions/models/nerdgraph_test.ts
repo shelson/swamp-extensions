@@ -1,6 +1,12 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { z } from "npm:zod@4";
-import { assertNoErrors, client, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  client,
+  discoverAllMethod,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 import {
   mockContext,
   stubFetchQueue,
@@ -46,6 +52,48 @@ Deno.test("client surfaces GraphQL errors from a 200 response", async () => {
   } finally {
     globalThis.fetch = original;
   }
+});
+
+Deno.test("client rejects a non-HTTPS endpoint", () => {
+  assertThrows(
+    () =>
+      client({
+        accountId: 1,
+        apiKey: "k",
+        endpoint: "http://api.newrelic.com/graphql",
+      }),
+    Error,
+    "https://",
+  );
+});
+
+Deno.test("discoverAll records a truncated discovery summary when capped", async () => {
+  let calls = 0;
+  const model = fakeModel({
+    methods: {},
+    extraMethods: {
+      discoverAll: discoverAllMethod<{ id: string }>({
+        description: "capped listing",
+        keyOf: (i) => i.id,
+        maxItems: 1,
+        fetchPage: (_nr, cursor) => {
+          calls++;
+          return Promise.resolve(
+            cursor === null
+              ? { items: [{ id: "a" }], nextCursor: "c1" }
+              : { items: [{ id: "b" }], nextCursor: null },
+          );
+        },
+      }),
+    },
+  });
+  const { ctx, written } = mockContext();
+  await model.methods.discoverAll.execute({}, ctx);
+  assertEquals(calls, 1);
+  const summary = written.find((w) => w.spec === "discovery");
+  assertEquals(summary?.name, "last-run");
+  assertEquals(summary?.data.truncated, true);
+  assertEquals(summary?.data.count, 1);
 });
 
 Deno.test("nrModel writes state/current by default and honours resource overrides", async () => {

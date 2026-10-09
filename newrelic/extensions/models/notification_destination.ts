@@ -9,7 +9,13 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { assertNoErrors, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const DestinationType = z.enum([
   "EMAIL",
@@ -42,6 +48,12 @@ const Auth = z.looseObject({ type: z.string() });
 const FIELDS = `id name type active status guid accountId
   properties { key value label displayValue }`;
 
+interface Destination extends Record<string, unknown> {
+  id: string;
+  name: string;
+  type: string;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-notification-destination",
   description: "New Relic notification destination",
@@ -55,6 +67,39 @@ const definition = nrModel({
   syncLookupArg: "destinationId",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<Destination>({
+      description:
+        "List every notification destination in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (d) => d.id,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const data = await nr.query<{
+          actor: {
+            account: {
+              aiNotifications: {
+                destinations: {
+                  entities: Destination[];
+                  nextCursor: string | null;
+                };
+              };
+            };
+          };
+        }>(
+          `query($accountId: Int!, $cursor: String) {
+             actor { account(id: $accountId) { aiNotifications {
+               destinations(cursor: $cursor) {
+                 entities { id name type active status guid }
+                 nextCursor
+               }
+             } } }
+           }`,
+          { accountId: nr.accountId, cursor },
+        );
+        const result = data.actor.account.aiNotifications.destinations;
+        return { items: result.entities, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a notification destination",
@@ -194,5 +239,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-notification-destination",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

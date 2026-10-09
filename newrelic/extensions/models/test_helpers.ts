@@ -63,7 +63,7 @@ export function mockContext(
       apiKey: "NRAK-test",
       endpoint: "https://test.invalid/graphql",
     },
-    logger: { info: () => {} },
+    logger: { info: () => {}, warning: () => {} },
     readResource: (name: string) => Promise.resolve(stored[name] ?? null),
     writeResource: (
       spec: string,

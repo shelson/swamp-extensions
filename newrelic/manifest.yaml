@@ -1,6 +1,6 @@
 manifestVersion: 1
-name: '@shelson/newrelic'
-version: "2026.09.25.1"
+name: "@shelson/newrelic"
+version: "2026.10.10.1"
 description: |
   New Relic entity model types backed by the NerdGraph GraphQL API
   (https://api.newrelic.com/graphql). One model type per entity kind —
