@@ -1,0 +1,41 @@
+manifestVersion: 1
+name: "@shelson/pi-agent"
+version: 2026.09.26.2
+description: >
+  Run the pi coding agent from swamp workflows via its in-process TypeScript
+  SDK — no subprocess, no terminal scraping.
+
+
+  Each `run` sends one prompt to a pi agent session and captures the response
+  text, tool calls, token usage, and cost as structured swamp data. Sessions
+  are pi's persistent JSONL sessions, so successive runs with the same
+  sessionKey continue the same conversation; give each work item its own key
+  to isolate context.
+
+
+  The agent is hermetic: provider, model, and an explicit API key (usually
+  sourced from a vault with vault.get(...)) are required, and the running
+  user's ~/.pi is never read or written. Credentials, global resources, and
+  sessions live in an isolated repo-local agentDir, so the agent starts clean
+  and loads only project resources from its working directory. Working
+  directory, thinking level, tool allow/deny lists, resource discovery, and the
+  system prompt are all model configuration. A `models` method lists the
+  models your credentials can reach, and `sessions` lists pi sessions for a
+  directory.
+repository: "https://github.com/shelson/swamp-extensions"
+models:
+  - pi_agent.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+labels:
+  - agent
+  - pi
+  - coding-agent
+  - automation
+dependencies: []

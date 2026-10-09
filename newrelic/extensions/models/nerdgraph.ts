@@ -63,10 +63,16 @@ export interface NerdGraph {
   ): Promise<T>;
 }
 
+/** Logger surface available to method implementations and checks. */
+export interface MethodLogger {
+  info(msg: string, ...args: unknown[]): void;
+  warning(msg: string, ...args: unknown[]): void;
+}
+
 /** Execution context supplied by swamp. */
 interface Context {
   globalArgs: GlobalArgs;
-  logger: { info(msg: string, ...args: unknown[]): void };
+  logger: MethodLogger;
   readResource: (name: string) => Promise<Record<string, unknown> | null>;
   writeResource: (
     specName: string,
@@ -79,7 +85,7 @@ interface Context {
 /** Context supplied to a pre-flight check. */
 interface CheckContext {
   globalArgs: GlobalArgs;
-  logger: { info(msg: string, ...args: unknown[]): void };
+  logger: MethodLogger;
 }
 
 /** A pre-flight check that runs before mutating methods. */
@@ -142,6 +148,11 @@ function retryDelayMs(resp: Response, attempt: number): number {
  * mutation on 5xx, since the server may already have applied it.
  */
 export function client(g: GlobalArgs): NerdGraph {
+  if (!g.endpoint.startsWith("https://")) {
+    throw new Error(
+      `endpoint must use https:// so the API key is never sent in clear text (got "${g.endpoint}")`,
+    );
+  }
   return {
     accountId: g.accountId,
     query: async <T>(
@@ -220,6 +231,89 @@ function credentialCheck(): CheckDefinition {
   };
 }
 
+/** Resource spec that records the last `discoverAll` run's count and truncation. */
+export const DISCOVERY_SPEC = "discovery";
+/** Instance name of the `discoverAll` run summary. */
+export const DISCOVERY_INSTANCE = "last-run";
+/** Schema of the `discoverAll` run summary record. */
+export const DiscoverySummarySchema = z.object({
+  truncated: z.boolean(),
+  count: z.number(),
+  fetchedAt: z.string(),
+});
+
+/** One page of a paginated listing. */
+export interface DiscoverPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/**
+ * Build a zero-argument factory method that pages through a listing and writes
+ * every item as its own resource instance in a single execution (one lock
+ * acquisition, instead of one `lookup` per entity).
+ */
+export function discoverAllMethod<T extends Record<string, unknown>>(opts: {
+  description: string;
+  /** Instance name for an item (usually its id or guid). */
+  keyOf: (item: T) => string;
+  fetchPage: (nr: NerdGraph, cursor: string | null) => Promise<DiscoverPage<T>>;
+  /** Resource spec items are written to. Defaults to `state`. */
+  resourceSpec?: string;
+  /** Stop paging once this many items are collected. Defaults to 2000. */
+  maxItems?: number;
+}): NrFactoryMethod {
+  const spec = opts.resourceSpec ?? "state";
+  const maxItems = opts.maxItems ?? 2000;
+  return {
+    description: opts.description,
+    arguments: z.object({}),
+    execute: async (_args: unknown, context: Context) => {
+      const nr = client(context.globalArgs);
+      context.logger.info("discoverAll: running", { spec });
+      const items: T[] = [];
+      let cursor: string | null = null;
+      let truncated = false;
+      do {
+        const page = await opts.fetchPage(nr, cursor);
+        items.push(...page.items);
+        cursor = page.nextCursor;
+        if (cursor && items.length >= maxItems) {
+          truncated = true;
+          break;
+        }
+      } while (cursor);
+      context.logger.info("discoverAll: found {count}", {
+        count: items.length,
+        truncated,
+      });
+      const handles = [];
+      for (const item of items) {
+        handles.push(
+          await context.writeResource(spec, opts.keyOf(item), { ...item }),
+        );
+      }
+      handles.push(
+        await context.writeResource(DISCOVERY_SPEC, DISCOVERY_INSTANCE, {
+          truncated,
+          count: items.length,
+          fetchedAt: new Date().toISOString(),
+        }),
+      );
+      return { dataHandles: handles };
+    },
+  };
+}
+
+/** A method with its own `execute`, passed to `nrModel` as `extraMethods`. */
+export interface NrFactoryMethod {
+  description: string;
+  // deno-lint-ignore no-explicit-any
+  arguments: z.ZodType<any>;
+  // deno-lint-ignore no-explicit-any
+  execute: (args: any, context: any) => Promise<unknown>;
+}
+
 /** Build a swamp model definition from a set of NerdGraph-backed methods. */
 export function nrModel(def: {
   /** Model type name, e.g. `@shelson/newrelic-dashboard`. */
@@ -251,6 +345,11 @@ export function nrModel(def: {
   /** Extracts the entity name from create arguments, for idempotent create. */
   // deno-lint-ignore no-explicit-any
   nameFromArgs?: (args: any) => string | undefined;
+  /**
+   * Methods with a custom `execute` (e.g. factory methods that write many
+   * resource instances), merged in alongside the generated ones.
+   */
+  extraMethods?: Record<string, unknown>;
   // deno-lint-ignore no-explicit-any
 }): any {
   const methods: Record<string, unknown> = {};
@@ -313,6 +412,7 @@ export function nrModel(def: {
       def.syncLookupArg ?? def.syncKey,
     );
   }
+  Object.assign(methods, def.extraMethods);
   const resources: Record<string, unknown> = {
     state: {
       description: def.description,
@@ -321,6 +421,15 @@ export function nrModel(def: {
       garbageCollection: 10,
     },
   };
+  if (def.extraMethods && "discoverAll" in def.extraMethods) {
+    resources[DISCOVERY_SPEC] = {
+      description:
+        "Summary of the last discoverAll run (item count and whether it was truncated)",
+      schema: DiscoverySummarySchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    };
+  }
   for (const [name, spec] of Object.entries(def.resources ?? {})) {
     resources[name] = {
       ...spec,
@@ -330,7 +439,7 @@ export function nrModel(def: {
   }
   return {
     type: def.type,
-    version: "2026.09.25.1",
+    version: "2026.10.10.1",
     upgrades: [
       {
         toVersion: "2026.09.24.1",
@@ -345,6 +454,12 @@ export function nrModel(def: {
       {
         toVersion: "2026.09.25.1",
         description: "Version bump, no schema changes",
+        upgradeAttributes: (old: Record<string, unknown>) => old,
+      },
+      {
+        toVersion: "2026.10.10.1",
+        description:
+          "Add discoverAll/getDefinition(s)/tag methods; no globalArguments changes",
         upgradeAttributes: (old: Record<string, unknown>) => old,
       },
     ],

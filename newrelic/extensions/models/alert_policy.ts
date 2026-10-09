@@ -4,7 +4,12 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const IncidentPreference = z.enum([
   "PER_POLICY",
@@ -13,6 +18,12 @@ const IncidentPreference = z.enum([
 ]);
 
 const FIELDS = `id name incidentPreference accountId`;
+
+interface Policy extends Record<string, unknown> {
+  id: string;
+  name: string;
+  incidentPreference: string;
+}
 
 const definition = nrModel({
   type: "@shelson/newrelic-alert-policy",
@@ -25,6 +36,39 @@ const definition = nrModel({
   syncKey: "id",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<Policy>({
+      description:
+        "List every alert policy in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (p) => p.id,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const data = await nr.query<{
+          actor: {
+            account: {
+              alerts: {
+                policiesSearch: {
+                  policies: Policy[];
+                  nextCursor: string | null;
+                };
+              };
+            };
+          };
+        }>(
+          `query($accountId: Int!, $cursor: String) {
+             actor { account(id: $accountId) { alerts {
+               policiesSearch(cursor: $cursor) {
+                 policies { id name incidentPreference accountId }
+                 nextCursor
+               }
+             } } }
+           }`,
+          { accountId: nr.accountId, cursor },
+        );
+        const result = data.actor.account.alerts.policiesSearch;
+        return { items: result.policies, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create an alert policy",
@@ -137,5 +181,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-alert-policy",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

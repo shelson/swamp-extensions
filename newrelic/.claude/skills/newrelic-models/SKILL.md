@@ -12,13 +12,12 @@ description: >
 # @shelson/newrelic model types
 
 Ten model types wrapping the New Relic NerdGraph API
-(`https://api.newrelic.com/graphql`). All share global arguments
-`accountId`, `apiKey` (USER key, sensitive — supply via vault expression), and
-`endpoint`, and the same `create` / `update` / `delete` / `lookup` lifecycle plus
-a zero-arg `sync` for drift detection
-(`@shelson/newrelic-account` is `lookup` + `nrql`). Mutating methods run a
-`credentials` pre-flight check labelled `policy`. State is written to one `state`
-resource instance named `current`:
+(`https://api.newrelic.com/graphql`). All share global arguments `accountId`,
+`apiKey` (USER key, sensitive — supply via vault expression), and `endpoint`,
+and the same `create` / `update` / `delete` / `lookup` lifecycle plus a zero-arg
+`sync` for drift detection (`@shelson/newrelic-account` is `lookup` + `nrql`).
+Mutating methods run a `credentials` pre-flight check labelled `policy`. State
+is written to one `state` resource instance named `current`:
 `data.latest("<model>", "current").attributes.<field>`.
 
 Need ad-hoc NRQL? Don't hand-roll HTTP — run `nrql` on the account model. It
@@ -41,8 +40,8 @@ in a live account silences production alerts.
 Read-only `lookup` calls against other accounts are fine.
 
 Clean up after yourself: delete any test entity you created, then delete the
-smoke-test model instance (`swamp model delete <name> --force`) so no API key
-is left in `models/`.
+smoke-test model instance (`swamp model delete <name> --force`) so no API key is
+left in `models/`.
 
 ## How the model types are built from the schema
 
@@ -55,12 +54,12 @@ To add a new entity type:
 1. Find the mutations and the account query field in the schema slice, e.g.
    `jq -r --arg re '^Alerts' -f sdl.jq newrelic-schema.json`.
 2. Add `extensions/models/newrelic/<entity>.ts` using `nrModel()` from
-   `nerdgraph.ts`. Each method's `run(args, nr)` issues one `nr.query(...)`
-   and returns the attributes to store, or `null` to drop stored state
-   (that's what `delete` does).
+   `nerdgraph.ts`. Each method's `run(args, nr)` issues one `nr.query(...)` and
+   returns the attributes to store, or `null` to drop stored state (that's what
+   `delete` does).
 3. Mirror the NerdGraph `*Input` type in the Zod arguments — use
-   `z.looseObject({...})` for nested structures rather than re-modelling
-   pages, widgets, terms or filters. The schema is the contract.
+   `z.looseObject({...})` for nested structures rather than re-modelling pages,
+   widgets, terms or filters. The schema is the contract.
 4. Collapse variants into one type with a discriminator rather than adding one
    type per variant (see `conditionType` on alert conditions and `monitorType`
    on synthetic monitors, which pick the mutation name).
@@ -70,9 +69,9 @@ To add a new entity type:
    `errors { ... on AiNotificationsResponseError { description type } }`.
 6. Mark secrets (private location `key`, credentials) with
    `z.meta({ sensitive: true })` so swamp vaults them.
-7. Add the file to `manifest.yaml` `models:`, then
-   `~/.swamp/deno/deno check`, `swamp extension fmt manifest.yaml`, and smoke
-   test in the dedicated non-production account.
+7. Add the file to `manifest.yaml` `models:`, then `~/.swamp/deno/deno check`,
+   `swamp extension fmt manifest.yaml`, and smoke test in the dedicated
+   non-production account.
 
 ## Gotchas found the hard way
 

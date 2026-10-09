@@ -8,7 +8,7 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { nrModel } from "./nerdgraph.ts";
+import { discoverAllMethod, nrModel } from "./nerdgraph.ts";
 
 const definition = nrModel({
   type: "@shelson/newrelic-account",
@@ -23,6 +23,11 @@ const definition = nrModel({
     })),
   }),
   resources: {
+    accounts: {
+      description:
+        "An account visible to this API key, discovered by discoverAll",
+      schema: z.object({ id: z.number(), name: z.string() }),
+    },
     query: {
       description: "Results of an ad-hoc NRQL query",
       schema: z.looseObject({
@@ -30,6 +35,20 @@ const definition = nrModel({
         results: z.array(z.looseObject({})),
       }),
     },
+  },
+  extraMethods: {
+    discoverAll: discoverAllMethod<{ id: number; name: string }>({
+      description:
+        "List every New Relic account this API key can see and write each as its own accounts resource instance (factory pattern)",
+      resourceSpec: "accounts",
+      keyOf: (a) => String(a.id),
+      fetchPage: async (nr) => {
+        const data = await nr.query<
+          { actor: { accounts: { id: number; name: string }[] } }
+        >(`query { actor { accounts { id name } } }`);
+        return { items: data.actor.accounts, nextCursor: null };
+      },
+    }),
   },
   methods: {
     lookup: {
@@ -132,5 +151,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-account",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

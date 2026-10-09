@@ -4,7 +4,12 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const ConditionGroup = z.looseObject({
   operator: z.enum(["AND", "OR"]),
@@ -30,6 +35,12 @@ const FIELDS = `id name enabled description status accountId
   condition { operator conditions { attribute operator values } }
   schedule { startTime endTime timeZone repeat repeatCount endRepeat weeklyRepeatDays }`;
 
+interface MutingRule extends Record<string, unknown> {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-muting-rule",
   description: "New Relic alert muting rule",
@@ -41,6 +52,31 @@ const definition = nrModel({
   syncKey: "id",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<MutingRule>({
+      description:
+        "List every muting rule in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (r) => r.id,
+      fetchPage: async (nr: NerdGraph) => {
+        const data = await nr.query<{
+          actor: {
+            account: { alerts: { mutingRules: MutingRule[] } };
+          };
+        }>(
+          `query($accountId: Int!) {
+             actor { account(id: $accountId) { alerts {
+               mutingRules { id name enabled description status }
+             } } }
+           }`,
+          { accountId: nr.accountId },
+        );
+        return {
+          items: data.actor.account.alerts.mutingRules,
+          nextCursor: null,
+        };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a muting rule",
@@ -160,5 +196,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-muting-rule",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

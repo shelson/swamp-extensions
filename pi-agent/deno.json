@@ -1,0 +1,17 @@
+{
+  "tasks": {
+    "check": "deno check extensions/models/*.ts",
+    "lint": "deno lint extensions/",
+    "fmt": "deno fmt extensions/",
+    "test": "deno test --allow-env --allow-read --allow-write --allow-sys extensions/models/"
+  },
+  "lint": {
+    "include": ["extensions/"],
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  },
+  "compilerOptions": {
+    "strict": true
+  }
+}

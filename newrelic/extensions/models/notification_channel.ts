@@ -10,7 +10,13 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { assertNoErrors, NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  assertNoErrors,
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const ChannelType = z.enum([
   "EMAIL",
@@ -45,6 +51,13 @@ const FIELDS = `id name type product active status destinationId accountId
 const ERRORS =
   `errors { ... on AiNotificationsResponseError { description type } }`;
 
+interface Channel extends Record<string, unknown> {
+  id: string;
+  name: string;
+  type: string;
+  destinationId: string;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-notification-channel",
   description:
@@ -59,6 +72,36 @@ const definition = nrModel({
   syncLookupArg: "channelId",
   idempotentCreate: true,
   nameFromArgs: (args: { name?: string }) => args.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<Channel>({
+      description:
+        "List every notification channel in this account and write each as its own state resource instance (factory pattern)",
+      keyOf: (c) => c.id,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const data = await nr.query<{
+          actor: {
+            account: {
+              aiNotifications: {
+                channels: { entities: Channel[]; nextCursor: string | null };
+              };
+            };
+          };
+        }>(
+          `query($accountId: Int!, $cursor: String) {
+             actor { account(id: $accountId) { aiNotifications {
+               channels(cursor: $cursor) {
+                 entities { id name type product active status destinationId }
+                 nextCursor
+               }
+             } } }
+           }`,
+          { accountId: nr.accountId, cursor },
+        );
+        const result = data.actor.account.aiNotifications.channels;
+        return { items: result.entities, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a notification channel on a destination",
@@ -197,5 +240,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-notification-channel",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };

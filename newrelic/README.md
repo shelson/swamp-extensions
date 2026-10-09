@@ -1,7 +1,8 @@
 # @shelson/newrelic
 
-New Relic entity model types backed by NerdGraph (`https://api.newrelic.com/graphql`).
-The introspected schema used to build these lives in `swamp/schemafiles/`.
+New Relic entity model types backed by NerdGraph
+(`https://api.newrelic.com/graphql`). The introspected schema used to build
+these lives in `swamp/schemafiles/`.
 
 ## Quick start
 
@@ -26,29 +27,29 @@ swamp model method run my-dashboard sync
 
 ## Global arguments (all types)
 
-| Arg | Notes |
-| --- | --- |
-| `accountId` | New Relic account ID (int) |
-| `apiKey` | USER API key (`NRAK-…`), sensitive — supply via vault expression |
-| `endpoint` | Defaults to `https://api.newrelic.com/graphql`; use the EU endpoint for EU accounts |
+| Arg         | Notes                                                                               |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `accountId` | New Relic account ID (int)                                                          |
+| `apiKey`    | USER API key (`NRAK-…`), sensitive — supply via vault expression                    |
+| `endpoint`  | Defaults to `https://api.newrelic.com/graphql`; use the EU endpoint for EU accounts |
 
 State is stored as a single `state` resource instance named `current`, so CEL
 references read `data.latest("<model>", "current").attributes.<field>`.
 
 ## Model types
 
-| Type | Methods |
-| --- | --- |
-| `@shelson/newrelic-account` | `lookup` (read-only: account, org, auth domains, groups, users), `nrql` (ad-hoc NRQL query) |
-| `@shelson/newrelic-dashboard` | `create`, `update`, `delete`, `lookup` (by guid or exact name), `sync` |
-| `@shelson/newrelic-alert-policy` | `create`, `update`, `delete`, `lookup` (by id or exact name), `sync` |
-| `@shelson/newrelic-alert-condition` | `create`, `update`, `delete`, `lookup`, `sync`; `conditionType` = `STATIC` \| `BASELINE` \| `OUTLIER` |
-| `@shelson/newrelic-muting-rule` | `create`, `update`, `delete`, `lookup` (name match is client-side), `sync` |
-| `@shelson/newrelic-notification-channel` | `create`, `update`, `delete`, `lookup` (by id, or name ± `destinationId`), `sync` — source of the `channelId` workflows need |
-| `@shelson/newrelic-notification-destination` | `create`, `update`, `delete`, `lookup` (by id or exact name), `sync` |
-| `@shelson/newrelic-private-location` | `create`, `update`, `delete`, `lookup` (via entity search), `sync`; `key` is stored vaulted |
-| `@shelson/newrelic-workflow` | `create`, `update`, `delete`, `lookup`, `sync` |
-| `@shelson/newrelic-synthetic-monitor` | `create`, `update`, `delete`, `lookup`, `sync`; `monitorType` = `SIMPLE` \| `SIMPLE_BROWSER` \| `SCRIPT_API` \| `SCRIPT_BROWSER` \| `CERT_CHECK` \| `BROKEN_LINKS` \| `STEP` |
+| Type                                         | Methods                                                                                                                                                                                     |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@shelson/newrelic-account`                  | `lookup` (read-only: account, org, auth domains, groups, users), `nrql` (ad-hoc NRQL query), `discoverAll` (every account the key can see)                                                  |
+| `@shelson/newrelic-dashboard`                | `create`, `update`, `delete`, `lookup` (by guid or exact name), `sync`, `discoverAll`, `getDefinition`, `getDefinitions` (full pages/widgets), `tag`                                        |
+| `@shelson/newrelic-alert-policy`             | `create`, `update`, `delete`, `lookup` (by id or exact name), `sync`, `discoverAll`                                                                                                         |
+| `@shelson/newrelic-alert-condition`          | `create`, `update`, `delete`, `lookup`, `sync`, `discoverAll`; `conditionType` = `STATIC` \| `BASELINE` \| `OUTLIER`                                                                        |
+| `@shelson/newrelic-muting-rule`              | `create`, `update`, `delete`, `lookup` (name match is client-side), `sync`, `discoverAll`                                                                                                   |
+| `@shelson/newrelic-notification-channel`     | `create`, `update`, `delete`, `lookup` (by id, or name ± `destinationId`), `sync`, `discoverAll` — source of the `channelId` workflows need                                                 |
+| `@shelson/newrelic-notification-destination` | `create`, `update`, `delete`, `lookup` (by id or exact name), `sync`, `discoverAll`                                                                                                         |
+| `@shelson/newrelic-private-location`         | `create`, `update`, `delete`, `lookup` (via entity search), `sync`, `discoverAll`; `key` is stored vaulted                                                                                  |
+| `@shelson/newrelic-workflow`                 | `create`, `update`, `delete`, `lookup`, `sync`, `discoverAll`                                                                                                                               |
+| `@shelson/newrelic-synthetic-monitor`        | `create`, `update`, `delete`, `lookup`, `sync`, `discoverAll`; `monitorType` = `SIMPLE` \| `SIMPLE_BROWSER` \| `SCRIPT_API` \| `SCRIPT_BROWSER` \| `CERT_CHECK` \| `BROKEN_LINKS` \| `STEP` |
 
 Nested inputs (dashboard pages/widgets, condition terms, monitor options,
 workflow filters) are passed through to the matching NerdGraph `*Input` type
@@ -77,10 +78,10 @@ dashboard widgets accordingly.
 
 ## Ad-hoc NRQL
 
-`@shelson/newrelic-account` carries an `nrql` method so you can query the account
-without hand-rolling a NerdGraph request. Each result is stored as a `query`
-resource instance named by `name` (default `result`), so several queries can be
-kept side by side:
+`@shelson/newrelic-account` carries an `nrql` method so you can query the
+account without hand-rolling a NerdGraph request. Each result is stored as a
+`query` resource instance named by `name` (default `result`), so several queries
+can be kept side by side:
 
 ```bash
 swamp model method run my-account nrql \
@@ -88,8 +89,7 @@ swamp model method run my-account nrql \
 swamp data get my-account tx
 ```
 
-Reference the results with
-`data.latest("my-account", "tx").attributes.results`.
+Reference the results with `data.latest("my-account", "tx").attributes.results`.
 
 ## CEL expression reference
 
@@ -107,8 +107,8 @@ Secure credentials and user/group writes.
 
 ## Smoke tested
 
-Live against a dedicated non-production account: `lookup` for all ten types, plus full
-`create`/`update`/`delete` round-trips for dashboard, notification destination,
-notification channel, muting rule and private location. Alert policy/condition, workflow and
-synthetic monitor writes are schema-checked against the introspected schema but
-not yet run live.
+Live against a dedicated non-production account: `lookup` for all ten types,
+plus full `create`/`update`/`delete` round-trips for dashboard, notification
+destination, notification channel, muting rule and private location. Alert
+policy/condition, workflow and synthetic monitor writes are schema-checked
+against the introspected schema but not yet run live.

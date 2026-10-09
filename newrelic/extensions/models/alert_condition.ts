@@ -8,7 +8,12 @@
  * @module
  */
 import { z } from "npm:zod@4";
-import { NotFoundError, nrModel } from "./nerdgraph.ts";
+import {
+  discoverAllMethod,
+  type NerdGraph,
+  NotFoundError,
+  nrModel,
+} from "./nerdgraph.ts";
 
 const ConditionType = z.enum(["STATIC", "BASELINE", "OUTLIER"]);
 
@@ -31,6 +36,13 @@ const ConditionInput = z.looseObject({
 const FIELDS =
   `id name enabled policyId entityGuid description runbookUrl nrql { query }`;
 
+interface Condition extends Record<string, unknown> {
+  id: string;
+  name: string;
+  policyId: string;
+  enabled: boolean;
+}
+
 const definition = nrModel({
   type: "@shelson/newrelic-alert-condition",
   description: "New Relic NRQL alert condition",
@@ -44,6 +56,39 @@ const definition = nrModel({
   idempotentCreate: true,
   nameFromArgs: (args: { condition?: { name?: string } }) =>
     args.condition?.name,
+  extraMethods: {
+    discoverAll: discoverAllMethod<Condition>({
+      description:
+        "List every NRQL alert condition in this account (optionally scoped to a policyId) and write each as its own state resource instance (factory pattern)",
+      keyOf: (c) => c.id,
+      fetchPage: async (nr: NerdGraph, cursor) => {
+        const data = await nr.query<{
+          actor: {
+            account: {
+              alerts: {
+                nrqlConditionsSearch: {
+                  nrqlConditions: Condition[];
+                  nextCursor: string | null;
+                };
+              };
+            };
+          };
+        }>(
+          `query($accountId: Int!, $cursor: String) {
+             actor { account(id: $accountId) { alerts {
+               nrqlConditionsSearch(cursor: $cursor) {
+                 nrqlConditions { id name enabled policyId entityGuid }
+                 nextCursor
+               }
+             } } }
+           }`,
+          { accountId: nr.accountId, cursor },
+        );
+        const result = data.actor.account.alerts.nrqlConditionsSearch;
+        return { items: result.nrqlConditions, nextCursor: result.nextCursor };
+      },
+    }),
+  },
   methods: {
     create: {
       description: "Create a NRQL alert condition on a policy",
@@ -184,5 +229,5 @@ const definition = nrModel({
 export const model = {
   ...definition,
   type: "@shelson/newrelic-alert-condition",
-  version: "2026.09.25.1",
+  version: "2026.10.10.1",
 };
